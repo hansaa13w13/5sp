@@ -136,7 +136,7 @@ void handle_root() {
       ? "<span class='badge b-purple'>5GHz</span>"
       : "<span class='badge b-blue'>2.4G</span>";
     html += "<tr><td>" + String(i) + "</td><td><b>" + ssid_disp + "</b></td>"
-            "<td style='font-size:.8em;color:#8b949e'>" + WiFi.BSSIDstr(i) + "</td>"
+            "<td style='font-size:.8em;color:#8b949e'>" + WiFi_BSSIDstr(i) + "</td>"
             "<td>" + String(ch) + "</td>"
             "<td>" + bandTag + "</td>"
             "<td>" + String(WiFi.RSSI(i)) + " dBm</td>"
@@ -1304,7 +1304,9 @@ static void handle_deauth() {
   String result;
   if (wifi_number < num_networks) {
     start_deauth(wifi_number, DEAUTH_TYPE_SINGLE, reason);
-    result = "<div class='alert-ok'>&#9889; Deauth basladi: <b>" + WiFi.SSID(wifi_number) +
+    // AmebaD WiFi.SSID() char* döndürür; "literal" + char* C++'da geçersiz.
+    // String(...) ile sarmalayarak operatör+ zinciri düzgün çalışır.
+    result = String("<div class='alert-ok'>&#9889; Deauth basladi: <b>") + WiFi.SSID(wifi_number) +
              "</b> &mdash; Neden: " + String(reason) + "</div>";
   } else {
     result = F("<div class='alert-err'>&#10060; Gecersiz ag numarasi. Once tarayin.</div>");

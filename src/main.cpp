@@ -87,7 +87,7 @@ void setup() {
 #ifndef BOARD_BW16
   WiFi.mode(WIFI_MODE_APSTA);
 #endif
-  WiFi.softAP(AP_SSID, AP_PASS);
+  WiFi_softAP(AP_SSID, AP_PASS);
   apply_max_performance();
 
   start_web_interface();

@@ -366,7 +366,7 @@ void retrack_deauth_target() {
         memcpy(deauth_target_bssid, WiFi_BSSID_scan(i), 6);
         memcpy(deauth_frame.access_point, deauth_target_bssid, 6);
         memcpy(deauth_frame.sender,       deauth_target_bssid, 6);
-        WiFi.softAP(AP_SSID, AP_PASS, deauth_target_channel);
+        WiFi_softAP(AP_SSID, AP_PASS, deauth_target_channel);
         delay(100);
         apply_max_performance();
         DEBUG_PRINTF("Birincil yeni kanal: %d %s\n",
@@ -442,13 +442,13 @@ void start_deauth(int wifi_number, int attack_type, uint16_t reason) {
       IS_5GHZ_CHANNEL(deauth_target_channel) ? "(5GHz)" : "(2.4GHz)",
       deauth_has_companion ? " + eslıkci bant" : "");
 
-    WiFi.softAP(AP_SSID, AP_PASS, deauth_target_channel);
+    WiFi_softAP(AP_SSID, AP_PASS, deauth_target_channel);
     delay(100);
     apply_max_performance();
   } else {
     DEBUG_PRINTLN("Tum aglara deauth (2.4+5GHz)...");
-    WiFi.softAPdisconnect();
 #ifndef BOARD_BW16
+    WiFi.softAPdisconnect();
     WiFi.mode(WIFI_MODE_STA);
 #endif
     delay(100);

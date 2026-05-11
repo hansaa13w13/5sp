@@ -35,8 +35,23 @@ typedef int wifi_auth_mode_t;
 #define WIFI_AUTH_WPA2_PSK      4
 #define WIFI_AUTH_WPA_WPA2_PSK  8
 
+// ─── PROGMEM / F() / FPSTR uyumluluğu ────────────────────────────────────────
+// AmebaD Arduino SDK'da PROGMEM boş tanımlıdır; FPSTR ve F() no-op olarak sarmalanır.
+#ifndef PROGMEM
+#define PROGMEM
+#endif
+#ifndef F
+#define F(s) (s)
+#endif
+#ifndef FPSTR
+#define FPSTR(p) (p)
+#endif
+
 // ─── WebServer uyumluluğu ─────────────────────────────────────────────────────
-#include <WiFiWebServer.h>
+// Tırnaklı include: önce proje include/ klasörüne bakar → include/WiFiWebServer.h
+// <...> yerine "..." kullanmak zorunlu — PlatformIO cache'indeki khoih-prog
+// kütüphanesini seçmesini engeller.
+#include "WiFiWebServer.h"
 typedef WiFiWebServer WebServerCompat;
 
 // ─── DNSServer (Captive Portal DNS — UDP tabanlı BW16 implementasyonu) ────────
@@ -108,6 +123,35 @@ inline const char* WiFi_SSID_cstr(int i)    { return WiFi.SSID((uint8_t)i); }
 inline int         WiFi_scanNetworks_ex()    { return (int)WiFi.scanNetworks(); }
 inline void        WiFi_scanDelete()         {}
 
+// ─── BSSIDstr: AmebaD'de WiFi.BSSID(index) yok ───────────────────────────────
+// AmebaD'nin tek BSSID() imzası: uint8_t* BSSID(uint8_t* buffer) — bağlı AP.
+// Tarama sonuçlarına göre BSSID alma API'si yok; bw16_scan_cache kullanılır.
+// bw16_scan_cache[i].bssid tarama sırasında 0'larla doldurulur (bilinmiyor).
+inline String WiFi_BSSIDstr(int i) {
+    static const uint8_t zero[6] = {};
+    const uint8_t* b = (i >= 0 && i < bw16_scan_cache_count)
+                       ? bw16_scan_cache[i].bssid
+                       : zero;
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+             b[0], b[1], b[2], b[3], b[4], b[5]);
+    return String(buf);
+}
+
+// ─── AP modu: AmebaD'de softAP() yok, apbegin() kullanılır ──────────────────
+// apbegin(char* ssid, char* channel)                  — açık ağ
+// apbegin(char* ssid, char* passphrase, char* channel)— şifreli ağ
+// Kanal sayıdan string'e çevrilmeli (örn. 6 → "6").
+inline void WiFi_softAP(const char* ssid, const char* pass = "", int channel = 1) {
+    char ch_str[4];
+    snprintf(ch_str, sizeof(ch_str), "%d", channel);
+    if (!pass || pass[0] == '\0') {
+        WiFi.apbegin((char*)ssid, ch_str);
+    } else {
+        WiFi.apbegin((char*)ssid, (char*)pass, ch_str);
+    }
+}
+
 #else
 // ─── ESP32 ────────────────────────────────────────────────────────────────────
 #include <esp_wifi.h>
@@ -120,6 +164,14 @@ inline int         WiFi_channel_scan(int i)  { return WiFi.channel(i); }
 inline const char* WiFi_SSID_cstr(int i)     { return WiFi.SSID(i).c_str(); }
 inline int         WiFi_scanNetworks_ex()    { return (int)WiFi.scanNetworks(false, true, false, 120); }
 inline void        WiFi_scanDelete()         { WiFi.scanDelete(); }
+
+// ─── AP modu: ESP32'de standart softAP() ─────────────────────────────────────
+inline void WiFi_softAP(const char* ssid, const char* pass = "", int channel = 1) {
+    WiFi.softAP(ssid, (pass && pass[0] != '\0') ? pass : nullptr, channel);
+}
+
+// ─── BSSIDstr: ESP32'de standart BSSIDstr() ──────────────────────────────────
+inline String WiFi_BSSIDstr(int i) { return WiFi.BSSIDstr(i); }
 
 #endif // BOARD_BW16
 
