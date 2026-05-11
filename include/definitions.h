@@ -52,9 +52,6 @@ static const int CHANNELS_5GHZ_COUNT = (int)(sizeof(CHANNELS_5GHZ) / sizeof(CHAN
 #if defined(BOARD_BW16)
   // BW16-KIT: GPIO10 (mavi LED)
   #define LED 10
-#elif defined(CONFIG_IDF_TARGET_ESP32C3)
-  // ESP32-C3 Super Mini: GPIO 8 (mavi LED)
-  #define LED 8
 #else
   // Diğer ESP32: GPIO 2 (yerleşik LED)
   #define LED 2

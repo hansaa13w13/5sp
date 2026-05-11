@@ -4,6 +4,9 @@
 void start_web_interface();
 void web_interface_handle_client();
 
+// Tarama sonucu sayısı — deauth.cpp ve evil_twin.cpp companion tespiti için kullanır
+extern int num_networks;
+
 // Evil Twin şifre testi durumu — main.cpp'den erişilir
 extern bool   et_test_pending;
 extern bool   et_result_ready;

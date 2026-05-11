@@ -99,14 +99,14 @@ void handle_root() {
   html.reserve(12000);
   html = F("<!DOCTYPE html><html lang='tr'><head>"
     "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>ESP32 Deauther</title>");
+    "<title>BW16 Deauther</title>");
   if (attack_running) html += F("<meta http-equiv='refresh' content='4'>");
   html += F("<style>");
   html += FPSTR(CSS);
   html += F("</style></head><body>");
 
-  html += F("<h1>&#128246; ESP32 Deauther</h1>"
-            "<p class='sub'>Wi-Fi guvenlik arac&#305; &mdash; Yaln&#305;zca egitim amacl&#305;</p>");
+  html += F("<h1>&#128246; BW16 Deauther</h1>"
+            "<p class='sub'>Wi-Fi guvenlik arac&#305; &mdash; Yaln&#305;zca egitim amacl&#305; | RTL8720DN 2.4+5GHz</p>");
 
   // Durum paneli
   html += F("<div class='statbar'>");
@@ -116,7 +116,11 @@ void handle_root() {
   if (evil_twin_active) {
     html += "<div class='stat'><div class='lbl'>ET SSID</div><div class='val ok'>" + evil_twin_ssid + "</div></div>";
     html += "<div class='stat'><div class='lbl'>ET Istemci</div><div class='val warn'>" + String(evil_twin_clients) + "</div></div>";
+    if (evil_twin_has_companion)
+      html += F("<div class='stat'><div class='lbl'>Bant</div><div class='val' style='color:#bc8cff'>2.4+5GHz</div></div>");
   }
+  if (deauth_type == DEAUTH_TYPE_SINGLE && deauth_target_ssid[0] != '\0' && deauth_has_companion)
+    html += F("<div class='stat'><div class='lbl'>Bant</div><div class='val' style='color:#bc8cff'>2.4+5GHz</div></div>");
   html += F("</div>");
 
   // Ağ tablosu
@@ -145,8 +149,30 @@ void handle_root() {
 
   // Deauth tek ağ
   html += F("<div class='card'><h2>&#9889; Deauth Saldirisi <span class='badge b-red'>Tek Ag</span></h2>"
-            "<p class='hint'>Belirli bir aga bagli istemcileri kopar.</p>"
-            "<form method='post' action='/deauth'>");
+            "<p class='hint'>Belirli bir aga bagli istemcileri kopar. Ayni modeme ait 2.4GHz+5GHz eslikci band otomatik tespit edilirse her iki banda ayni anda saldirilir.</p>");
+  // Aktif deauth + companion göstergesi
+  if (deauth_type == DEAUTH_TYPE_SINGLE && deauth_target_ssid[0] != '\0') {
+    html += "<div class='alert-ok'>&#9889; Aktif: <b>" + String(deauth_target_ssid) + "</b>"
+            " &mdash; Kanal " + String(deauth_target_channel) +
+            (IS_5GHZ_CHANNEL(deauth_target_channel)
+              ? " <span class='badge b-purple'>5GHz</span>"
+              : " <span class='badge b-blue'>2.4G</span>") + "</div>";
+    if (deauth_has_companion) {
+      html += "<div style='background:#2d1060;border:1px solid #bc8cff;border-radius:6px;"
+              "padding:9px 11px;margin-top:7px;font-size:.85em;color:#e2ccff'>"
+              "&#128225; Cift bant aktif &mdash; eslıkci kanal: <b>" + String(deauth_target2_channel) + "</b>"
+              + (IS_5GHZ_CHANNEL(deauth_target2_channel)
+                  ? " <span class='badge b-purple'>5GHz</span>"
+                  : " <span class='badge b-blue'>2.4G</span>")
+              + " BSSID: <code style='color:#bc8cff;background:#1a0d40;padding:1px 5px;"
+                "border-radius:3px'>"
+              + String(deauth_target2_bssid[0], HEX) + ":" + String(deauth_target2_bssid[1], HEX) + ":"
+              + String(deauth_target2_bssid[2], HEX) + ":" + String(deauth_target2_bssid[3], HEX) + ":"
+              + String(deauth_target2_bssid[4], HEX) + ":" + String(deauth_target2_bssid[5], HEX)
+              + "</code></div>";
+    }
+  }
+  html += F("<form method='post' action='/deauth' style='margin-top:11px'>");
   html += "<input type='number' name='net_num' placeholder='Ag Numarasi (0-" + String(max(0, num_networks - 1)) + ")' min='0'>";
   html += F("<input type='number' name='reason' placeholder='Neden Kodu' value='1'>"
             "<button class='btn btn-red' type='submit'>&#9889; Deauth Baslatı</button>"
@@ -154,7 +180,7 @@ void handle_root() {
 
   // Deauth tümü
   html += F("<div class='card'><h2>&#128165; Tum Aglara Deauth <span class='badge b-orange'>Uyari</span></h2>"
-            "<p class='hint'>Tum kanallar tarandi, tum istemciler deauth edilir. Durdurmak icin ESP32 resetlenmelidir.</p>"
+            "<p class='hint'>Tum kanallar tarandi, tum istemciler deauth edilir (2.4GHz + 5GHz). Durdurmak icin BW16 kartini yeniden baslatin.</p>"
             "<form method='post' action='/deauth_all'>"
             "<input type='number' name='reason' placeholder='Neden Kodu' value='1'>"
             "<button class='btn btn-orange' type='submit'>&#128165; Tumune Saldır</button>"
@@ -164,7 +190,22 @@ void handle_root() {
   html += F("<div class='card'><h2>&#128126; Evil Twin <span class='badge b-purple'>Sifre Yakala</span></h2>");
   if (evil_twin_active) {
     html += "<div class='alert-ok'>&#9679; Aktif: <b>" + evil_twin_ssid + "</b> &mdash; " +
-            String(evil_twin_clients) + " istemci bagli</div>";
+            String(evil_twin_clients) + " istemci bagli &mdash; Kanal " + String(evil_twin_channel) +
+            (IS_5GHZ_CHANNEL(evil_twin_channel)
+              ? " <span class='badge b-purple'>5GHz</span>"
+              : " <span class='badge b-blue'>2.4G</span>") + "</div>";
+
+    // Çift bant companion göstergesi
+    if (evil_twin_has_companion) {
+      html += "<div style='background:#2d1060;border:1px solid #bc8cff;border-radius:6px;"
+              "padding:9px 11px;margin-top:7px;font-size:.85em;color:#e2ccff'>"
+              "&#128225; Cift bant deauth aktif &mdash; eslıkci kanal: <b>"
+              + String(evil_twin_channel2) + "</b>"
+              + (IS_5GHZ_CHANNEL(evil_twin_channel2)
+                  ? " <span class='badge b-purple'>5GHz</span>"
+                  : " <span class='badge b-blue'>2.4G</span>")
+              + " &mdash; her iki banttan da deauth gonderiliyor</div>";
+    }
 
     // WPS PBC durum göstergesi
     if (et_wps_pbc_found) {
@@ -1288,7 +1329,7 @@ static void handle_deauth_all() {
     "<title>Tum Aglar</title><style>");
   html += FPSTR(CSS);
   html += F("</style></head><body><div style='max-width:500px;margin:50px auto'><div class='card'>"
-    "<div class='alert-err'>&#128165; Tum aglara saldiri basladi! Durdurmak icin ESP32 resetleyin.</div>"
+    "<div class='alert-err'>&#128165; Tum aglara saldiri basladi! (2.4GHz + 5GHz) Durdurmak icin BW16 kartini yeniden baslatin.</div>"
     "</div></div></body></html>");
   server.send(200, "text/html", html);
   server.stop();
@@ -1418,8 +1459,8 @@ static void handle_wps_stop() {
 
 static void handle_export_pw() {
   int count = passwords_count();
-  String txt = "ESP32-Deauther - Yakalanan Sifreler\n";
-  txt += "====================================\n";
+  String txt = "BW16 Deauther (RTL8720DN) - Yakalanan Sifreler\n";
+  txt += "===============================================\n";
   if (count == 0) {
     txt += "(Henuz kayitli sifre yok)\n";
   } else {
