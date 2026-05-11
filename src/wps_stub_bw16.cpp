@@ -1,14 +1,11 @@
-// wps_stub_bw16.cpp
-// RTL8720DN (BW16) için WPS saldırısı stub'ları
+// wps.cpp
+// BW16 / RTL8720DN için WPS saldırısı stub'ları
 // ESP-IDF WPS API'si Ameba SDK'da bulunmadığından WPS saldırısı desteklenmiyor.
-// Tüm fonksiyonlar boş bırakılmış; derleyici hatası oluşmaz.
-
-#ifdef BOARD_BW16
 
 #include "wps_attack.h"
 #include "wps_beacon_ie.h"
 
-// ─── Dışa açılan WPS değişkenleri (web_interface.cpp okur) ────────────────────
+// ─── Dışa açılan WPS değişkenleri ────────────────────────────────────────────
 wps_target_t wps_targets[WPS_MAX_TARGETS];
 int          wps_target_count  = 0;
 wps_state_t  wps_attack_state  = WPS_IDLE;
@@ -22,7 +19,7 @@ char         wps_vendor_name[32] = {0};
 uint8_t      wps_current_mac[6]  = {0};
 int          wps_lockout_count   = 0;
 
-// ─── WPS beacon IE global (web_interface.cpp okur) ───────────────────────────
+// ─── WPS beacon IE global ─────────────────────────────────────────────────────
 wps_device_info_t wps_device_info = {};
 
 // ─── Stub fonksiyonlar ────────────────────────────────────────────────────────
@@ -37,5 +34,3 @@ bool wps_capture_device_info(const uint8_t *, int, uint32_t) { return false; }
 int  wps_serial_to_pins(const char *, char[][9], int)          { return 0; }
 void wps_assess_pixie_risk(wps_device_info_t &)                {}
 uint8_t wps_pin_checksum(uint32_t)                             { return 0; }
-
-#endif // BOARD_BW16

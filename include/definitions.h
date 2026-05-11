@@ -26,10 +26,6 @@
 #define IS_5GHZ_CHANNEL(ch) ((ch) >= 36)
 
 // 5 GHz UNII bandları için CSA operating class
-// UNII-1  : kanallar 36-48  → sınıf 115
-// UNII-2A : kanallar 52-64  → sınıf 118
-// UNII-2C : kanallar 100-144 → sınıf 121
-// UNII-3  : kanallar 149-165 → sınıf 125
 static inline uint8_t get_5ghz_op_class(uint8_t ch) {
   if (ch <= 48)  return 115;
   if (ch <= 64)  return 118;
@@ -39,32 +35,24 @@ static inline uint8_t get_5ghz_op_class(uint8_t ch) {
 
 // Tüm geçerli 5 GHz kanalları (802.11a/n/ac)
 static const uint8_t CHANNELS_5GHZ[] = {
-  36, 40, 44, 48,               // UNII-1
-  52, 56, 60, 64,               // UNII-2A (DFS)
-  100, 104, 108, 112,           // UNII-2C (DFS)
-  116, 120, 124, 128,           // UNII-2C (DFS)
-  132, 136, 140, 144,           // UNII-2C (DFS)
-  149, 153, 157, 161, 165       // UNII-3
+  36, 40, 44, 48,
+  52, 56, 60, 64,
+  100, 104, 108, 112,
+  116, 120, 124, 128,
+  132, 136, 140, 144,
+  149, 153, 157, 161, 165
 };
 static const int CHANNELS_5GHZ_COUNT = (int)(sizeof(CHANNELS_5GHZ) / sizeof(CHANNELS_5GHZ[0]));
 
 // ─── LED pin tanımları ────────────────────────────────────────────────────────
-#if defined(BOARD_BW16)
-  // BW16-KIT: GPIO10 (mavi LED)
-  #define LED 10
-#else
-  // Diğer ESP32: GPIO 2 (yerleşik LED)
-  #define LED 2
-#endif
+// BW16-KIT: GPIO10 (mavi LED, aktif-düşük)
+#define LED 10
 
+// ─── Debug makroları ──────────────────────────────────────────────────────────
 #ifdef SERIAL_DEBUG
 #define DEBUG_PRINT(...)   Serial.print(__VA_ARGS__)
 #define DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
-#if defined(BOARD_BW16)
 #define DEBUG_PRINTF(...) do { char _dbg[256]; snprintf(_dbg, sizeof(_dbg), __VA_ARGS__); Serial.print(_dbg); } while(0)
-#else
-#define DEBUG_PRINTF(...)  Serial.printf(__VA_ARGS__)
-#endif
 #else
 #define DEBUG_PRINT(...)
 #define DEBUG_PRINTLN(...)

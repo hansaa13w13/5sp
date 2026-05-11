@@ -24,17 +24,6 @@ static String encTag(wifi_auth_mode_t t) {
   }
 }
 
-static String getEncryptionType(wifi_auth_mode_t t) {
-  switch ((int)t) {
-    case WIFI_AUTH_OPEN:         return "Open";
-    case WIFI_AUTH_WEP:          return "WEP";
-    case WIFI_AUTH_WPA_PSK:      return "WPA_PSK";
-    case WIFI_AUTH_WPA2_PSK:     return "WPA2_PSK";
-    case WIFI_AUTH_WPA_WPA2_PSK: return "WPA_WPA2_PSK";
-    default:                     return "UNKNOWN";
-  }
-}
-
 static void redirect_root() {
   server.sendHeader("Location", "/");
   server.send(301);
@@ -1346,9 +1335,7 @@ static void handle_rescan() {
 
 void web_interface_do_rescan() {
   num_networks = WiFi.scanNetworks();
-#ifdef BOARD_BW16
   bw16_cache_scan(num_networks);
-#endif
 }
 
 static void handle_stop() {

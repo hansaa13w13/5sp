@@ -9,17 +9,13 @@
 #include "definitions.h"
 #include "wps_attack.h"
 
-#ifndef BOARD_BW16
-#include <esp_wifi.h>
-#endif
-
 int curr_channel       = 1;
 int curr_5ghz_idx      = 0;
 bool sweep_5ghz        = false;
 
 static unsigned long last_csa_send        = 0;
 static unsigned long last_retrack         = 0;
-static unsigned long last_companion_burst = 0;  // Çift bant burst zamanlayıcısı
+static unsigned long last_companion_burst = 0;
 
 // ─── Maks Performans ─────────────────────────────────────────────────────────
 void apply_max_performance() {
@@ -27,27 +23,11 @@ void apply_max_performance() {
 }
 
 void reapply_wifi_power() {
-#ifndef BOARD_BW16
-  extern bool et_wps_pbc_running;
-  hal_reapply_wifi_power(et_wps_pbc_running);
-#else
   hal_reapply_wifi_power(false);
-#endif
 }
-
-// ─── WiFi Olay İşleyici (yalnızca ESP32) ─────────────────────────────────────
-#ifndef BOARD_BW16
-static void on_wifi_event(WiFiEvent_t event) {
-#ifndef BOARD_BW16
-  extern bool et_wps_pbc_running;
-#endif
-  hal_reapply_wifi_power(et_wps_pbc_running);
-}
-#endif
 
 // ─── BW16: bir sonraki tarama kanalına geç ───────────────────────────────────
 static void bw16_advance_channel() {
-#ifdef BOARD_BW16
   if (!sweep_5ghz) {
     curr_channel++;
     if (curr_channel > CHANNEL_MAX) {
@@ -64,7 +44,6 @@ static void bw16_advance_channel() {
       sweep_5ghz    = false;
     }
   }
-#endif
 }
 
 // ─── Tek seferlik başlatma ────────────────────────────────────────────────────
@@ -80,36 +59,19 @@ void setup() {
   passwords_init();
   hal_hw_init();
 
-#ifndef BOARD_BW16
-  WiFi.onEvent(on_wifi_event);
-#endif
-
-#ifndef BOARD_BW16
-  WiFi.mode(WIFI_MODE_APSTA);
-#endif
   WiFi_softAP(AP_SSID, AP_PASS);
   apply_max_performance();
 
   start_web_interface();
   DEBUG_PRINTLN("Hazir. 192.168.4.1 adresine baglanin.");
-#ifdef BOARD_BW16
   DEBUG_PRINTLN("Platform: BW16 RTL8720DN — 2.4GHz + 5GHz");
-#else
-  DEBUG_PRINTLN("Platform: ESP32 — 2.4GHz");
-#endif
 }
 
 void loop() {
   reapply_wifi_power();
 
   if (deauth_type == DEAUTH_TYPE_ALL) {
-#ifdef BOARD_BW16
     bw16_advance_channel();
-#else
-    if (curr_channel > CHANNEL_MAX) curr_channel = 1;
-    hal_wifi_set_channel(curr_channel);
-    curr_channel++;
-#endif
     delay(10);
 
   } else if (evil_twin_active) {
@@ -178,9 +140,6 @@ void loop() {
         last_retrack = now;
         retrack_deauth_target();
       }
-      // ── Çift bant: eşlikçi kanala periyodik deauth patlaması ──────────────
-      // Her 2 saniyede bir eşlikçi kanalına (örn. 5GHz) atlar, broadcast
-      // deauth patlatır ve birincil kanala geri döner.
       if (deauth_has_companion && now - last_companion_burst >= 2000) {
         last_companion_burst = now;
         send_companion_deauth_burst();

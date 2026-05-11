@@ -1,7 +1,7 @@
 #ifndef PLATFORM_COMPAT_H
 #define PLATFORM_COMPAT_H
 
-#if defined(BOARD_BW16)
+// BW16 / RTL8720DN — tek hedef platform
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -36,7 +36,7 @@ typedef int wifi_auth_mode_t;
 #define WIFI_AUTH_WPA_WPA2_PSK  8
 
 // ─── PROGMEM / F() / FPSTR uyumluluğu ────────────────────────────────────────
-// AmebaD Arduino SDK'da PROGMEM boş tanımlıdır; FPSTR ve F() no-op olarak sarmalanır.
+// AmebaD Arduino SDK'da PROGMEM boş tanımlıdır
 #ifndef PROGMEM
 #define PROGMEM
 #endif
@@ -48,9 +48,6 @@ typedef int wifi_auth_mode_t;
 #endif
 
 // ─── WebServer uyumluluğu ─────────────────────────────────────────────────────
-// Tırnaklı include: önce proje include/ klasörüne bakar → include/WiFiWebServer.h
-// <...> yerine "..." kullanmak zorunlu — PlatformIO cache'indeki khoih-prog
-// kütüphanesini seçmesini engeller.
 #include "WiFiWebServer.h"
 typedef WiFiWebServer WebServerCompat;
 
@@ -102,8 +99,8 @@ public:
 };
 
 // ─── BW16 WiFi tarama sonucu önbelleği ────────────────────────────────────────
-// AmebaD 3.1.x WiFiClass; channel(networkItem) ve BSSID(networkItem) içermiyor.
-// BSSIDstr(i) ayrıştırılarak BSSID saklanır; kanal bilinmiyor (0 döner).
+// AmebaD WiFiClass tarama API'si: SSID(i), RSSI(i), encryptionType(i) destekler.
+// BSSID ve kanal bilgisi BSSIDstr(i) ayrıştırılarak ve channel(i) ile alınır.
 #define BW16_MAX_NETWORKS 30
 struct BW16ScanEntry { uint8_t bssid[6]; int ch; };
 extern BW16ScanEntry bw16_scan_cache[];
@@ -123,10 +120,7 @@ inline const char* WiFi_SSID_cstr(int i)    { return WiFi.SSID((uint8_t)i); }
 inline int         WiFi_scanNetworks_ex()    { return (int)WiFi.scanNetworks(); }
 inline void        WiFi_scanDelete()         {}
 
-// ─── BSSIDstr: AmebaD'de WiFi.BSSID(index) yok ───────────────────────────────
-// AmebaD'nin tek BSSID() imzası: uint8_t* BSSID(uint8_t* buffer) — bağlı AP.
-// Tarama sonuçlarına göre BSSID alma API'si yok; bw16_scan_cache kullanılır.
-// bw16_scan_cache[i].bssid tarama sırasında 0'larla doldurulur (bilinmiyor).
+// ─── BSSIDstr: bw16_scan_cache üzerinden ─────────────────────────────────────
 inline String WiFi_BSSIDstr(int i) {
     static const uint8_t zero[6] = {};
     const uint8_t* b = (i >= 0 && i < bw16_scan_cache_count)
@@ -138,10 +132,7 @@ inline String WiFi_BSSIDstr(int i) {
     return String(buf);
 }
 
-// ─── AP modu: AmebaD'de softAP() yok, apbegin() kullanılır ──────────────────
-// apbegin(char* ssid, char* channel)                  — açık ağ
-// apbegin(char* ssid, char* passphrase, char* channel)— şifreli ağ
-// Kanal sayıdan string'e çevrilmeli (örn. 6 → "6").
+// ─── AP modu: AmebaD'de apbegin() kullanılır ─────────────────────────────────
 inline void WiFi_softAP(const char* ssid, const char* pass = "", int channel = 1) {
     char ch_str[4];
     snprintf(ch_str, sizeof(ch_str), "%d", channel);
@@ -151,28 +142,5 @@ inline void WiFi_softAP(const char* ssid, const char* pass = "", int channel = 1
         WiFi.apbegin((char*)ssid, (char*)pass, ch_str);
     }
 }
-
-#else
-// ─── ESP32 ────────────────────────────────────────────────────────────────────
-#include <esp_wifi.h>
-#include <WebServer.h>
-#include <DNSServer.h>
-typedef WebServer WebServerCompat;
-
-inline uint8_t*    WiFi_BSSID_scan(int i)   { return WiFi.BSSID(i); }
-inline int         WiFi_channel_scan(int i)  { return WiFi.channel(i); }
-inline const char* WiFi_SSID_cstr(int i)     { return WiFi.SSID(i).c_str(); }
-inline int         WiFi_scanNetworks_ex()    { return (int)WiFi.scanNetworks(false, true, false, 120); }
-inline void        WiFi_scanDelete()         { WiFi.scanDelete(); }
-
-// ─── AP modu: ESP32'de standart softAP() ─────────────────────────────────────
-inline void WiFi_softAP(const char* ssid, const char* pass = "", int channel = 1) {
-    WiFi.softAP(ssid, (pass && pass[0] != '\0') ? pass : nullptr, channel);
-}
-
-// ─── BSSIDstr: ESP32'de standart BSSIDstr() ──────────────────────────────────
-inline String WiFi_BSSIDstr(int i) { return WiFi.BSSIDstr(i); }
-
-#endif // BOARD_BW16
 
 #endif // PLATFORM_COMPAT_H
