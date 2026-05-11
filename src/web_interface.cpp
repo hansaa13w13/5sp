@@ -129,7 +129,7 @@ void handle_root() {
   for (int i = 0; i < num_networks; i++) {
     String ssid_disp = WiFi.SSID(i);
     if (ssid_disp.length() == 0) ssid_disp = "<i style='color:#8b949e'>(Gizli)</i>";
-    int ch = WiFi.channel(i);
+    int ch = WiFi_channel_scan(i);
     // 5 GHz: kanal 36+ (802.11a/n/ac); 2.4 GHz: kanal 1-13
     bool is5g = IS_5GHZ_CHANNEL(ch);
     String bandTag = is5g
@@ -1344,6 +1344,9 @@ static void handle_rescan() {
 
 void web_interface_do_rescan() {
   num_networks = WiFi.scanNetworks();
+#ifdef BOARD_BW16
+  bw16_cache_scan(num_networks);
+#endif
 }
 
 static void handle_stop() {

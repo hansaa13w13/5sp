@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include "platform_compat.h"
 #include "types.h"
 #include "board_hal.h"
 #include "web_interface.h"
@@ -83,7 +84,9 @@ void setup() {
   WiFi.onEvent(on_wifi_event);
 #endif
 
+#ifndef BOARD_BW16
   WiFi.mode(WIFI_MODE_APSTA);
+#endif
   WiFi.softAP(AP_SSID, AP_PASS);
   apply_max_performance();
 

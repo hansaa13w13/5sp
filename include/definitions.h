@@ -60,7 +60,11 @@ static const int CHANNELS_5GHZ_COUNT = (int)(sizeof(CHANNELS_5GHZ) / sizeof(CHAN
 #ifdef SERIAL_DEBUG
 #define DEBUG_PRINT(...)   Serial.print(__VA_ARGS__)
 #define DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
+#if defined(BOARD_BW16)
+#define DEBUG_PRINTF(...) do { char _dbg[256]; snprintf(_dbg, sizeof(_dbg), __VA_ARGS__); Serial.print(_dbg); } while(0)
+#else
 #define DEBUG_PRINTF(...)  Serial.printf(__VA_ARGS__)
+#endif
 #else
 #define DEBUG_PRINT(...)
 #define DEBUG_PRINTLN(...)
